@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python test_discount_logic.py:*)",
+      "Bash(python test_real_api_format.py:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
