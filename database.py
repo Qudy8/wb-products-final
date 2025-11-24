@@ -49,6 +49,9 @@ class Database:
                 if 'excel_file_name' not in column_names:
                     await db.execute('ALTER TABLE users ADD COLUMN excel_file_name TEXT')
 
+                if 'discount_threshold' not in column_names:
+                    await db.execute('ALTER TABLE users ADD COLUMN discount_threshold INTEGER DEFAULT 28')
+
             except Exception as e:
                 # Если таблица не существует, она будет создана выше
                 pass
@@ -224,3 +227,24 @@ class Database:
                         'user_id': row[4]
                     }
                 return None
+
+    async def set_discount_threshold(self, user_id: int, threshold: int):
+        """Установка порога скидки для пользователя"""
+        async with aiosqlite.connect(self.db_name) as db:
+            await db.execute(
+                'UPDATE users SET discount_threshold = ? WHERE user_id = ?',
+                (threshold, user_id)
+            )
+            await db.commit()
+
+    async def get_discount_threshold(self, user_id: int) -> int:
+        """Получение порога скидки пользователя (по умолчанию 28%)"""
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                'SELECT discount_threshold FROM users WHERE user_id = ?',
+                (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0] is not None:
+                    return row[0]
+                return 28  # значение по умолчанию

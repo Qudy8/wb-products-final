@@ -62,6 +62,10 @@ class EditApiKeyValue(StatesGroup):
     waiting_for_key = State()
 
 
+class SetThreshold(StatesGroup):
+    waiting_for_threshold = State()
+
+
 # Обработчик команды /start
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -112,6 +116,10 @@ async def get_products(message: Message):
 
     await message.answer(f"⏳ Обрабатываю {len(active_keys)} активных ключей...")
 
+    # Получаем порог скидки пользователя
+    user_threshold = await db.get_discount_threshold(user_id)
+    logger.info(f"Порог скидки пользователя {user_id}: {user_threshold}%")
+
     # Загружаем Excel файл пользователя (если есть)
     excel_helper = None
     excel_file_data = await db.get_excel_file(user_id)
@@ -135,7 +143,7 @@ async def get_products(message: Message):
         await message.answer(f"🔑 Обрабатываю ключ {key_idx}/{len(active_keys)}: '{key_name}'...")
 
         # Вызываем функцию обработки одного ключа
-        key_result = await process_single_key(api_key, key_name, excel_helper)
+        key_result = await process_single_key(api_key, key_name, excel_helper, user_threshold)
 
         if key_result:
             all_key_results.append(key_result)
@@ -172,7 +180,7 @@ def format_price(price: float) -> str:
         return f"{price:.2f}"
 
 
-async def process_single_key(api_key: str, key_name: str, excel_helper):
+async def process_single_key(api_key: str, key_name: str, excel_helper, threshold: int = 28):
     """Обработка одного API ключа"""
 
     wb_api = WildberriesAPI(api_key)
@@ -304,8 +312,8 @@ async def process_single_key(api_key: str, key_name: str, excel_helper):
         # Сохраняем для статистики
         all_percentages.append((real_discount, nm_id))
 
-        # Фильтруем товары с реальной скидкой >= 28%
-        if real_discount >= 28:
+        # Фильтруем товары с реальной скидкой >= порога пользователя
+        if real_discount >= threshold:
             goods_to_show_filtered.append(product)
 
     # Сортируем товары по проценту разницы (от большего к меньшему)
@@ -366,7 +374,7 @@ async def process_single_key(api_key: str, key_name: str, excel_helper):
 
         stats_text += "\n"
 
-    logger.info(f"Ключ '{key_name}': после фильтра ≥28% осталось {len(goods_to_show_filtered)} товаров")
+    logger.info(f"Ключ '{key_name}': после фильтра ≥{threshold}% осталось {len(goods_to_show_filtered)} товаров")
 
     if not goods_to_show_filtered:
         return None
@@ -402,7 +410,8 @@ async def process_single_key(api_key: str, key_name: str, excel_helper):
         'product_info': product_info,
         'real_prices': real_prices,
         'total_goods': len(goods),
-        'goods_filtered': len(goods_to_show_filtered)
+        'goods_filtered': len(goods_to_show_filtered),
+        'threshold': threshold
     }
 
 
@@ -437,14 +446,14 @@ async def show_page(message_or_callback, user_id: int, page: int):
         text += "⚠️ Нет товаров, подходящих по критериям\n\n"
         text += "Возможные причины:\n"
         text += "  • Нет товаров в личном кабинете\n"
-        text += "  • Все товары отфильтрованы по критерию реальной скидки ≥28%\n"
+        text += f"  • Все товары отфильтрованы по критерию реальной скидки ≥{result.get('threshold', 28)}%\n"
     else:
         text += result['stats_text']
 
         # Показываем ВСЕ товары (убираем ограничение [:20])
         goods_to_display = result['unique_goods']
 
-        text += f"\n📦 Товары (всего: {result['total_goods']}, подходит по критерию ≥28%: {result['goods_filtered']}, показано: {len(goods_to_display)})\n\n"
+        text += f"\n📦 Товары (всего: {result['total_goods']}, подходит по критерию ≥{result.get('threshold', 28)}%: {result['goods_filtered']}, показано: {len(goods_to_display)})\n\n"
 
         # Отображаем товары только если они есть
         for i, product in enumerate(goods_to_display, 1):
@@ -726,6 +735,62 @@ async def delete_excel_file(callback: CallbackQuery):
         await callback.message.answer("⚠️ Excel файл не найден")
 
     await callback.answer()
+
+
+# ============ Обработчик настройки порога скидки ============
+
+@router.callback_query(F.data == "set_threshold")
+async def set_threshold_start(callback: CallbackQuery, state: FSMContext):
+    """Начало процесса настройки порога скидки"""
+    user_id = callback.from_user.id
+    current_threshold = await db.get_discount_threshold(user_id)
+
+    await callback.message.answer(
+        f"📈 Настройка порога скидки\n\n"
+        f"Текущий порог: {current_threshold}%\n\n"
+        f"Отправьте новое значение порога (от 0 до 100).\n"
+        f"Будут показаны товары с реальной скидкой >= этого значения.",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(SetThreshold.waiting_for_threshold)
+    await callback.answer()
+
+
+@router.message(SetThreshold.waiting_for_threshold)
+async def set_threshold_process(message: Message, state: FSMContext):
+    """Обработка нового значения порога"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        has_key = await db.has_api_key(message.from_user.id)
+        await message.answer(
+            "Настройка порога отменена",
+            reply_markup=get_main_menu(has_key)
+        )
+        return
+
+    try:
+        threshold = int(message.text)
+        if threshold < 0 or threshold > 100:
+            await message.answer(
+                "❌ Пожалуйста, введите число от 0 до 100"
+            )
+            return
+
+        user_id = message.from_user.id
+        await db.set_discount_threshold(user_id, threshold)
+        await state.clear()
+
+        has_key = await db.has_api_key(user_id)
+        await message.answer(
+            f"✅ Порог скидки установлен: {threshold}%\n\n"
+            f"Теперь при поиске товаров будут показаны только те, "
+            f"у которых реальная скидка >= {threshold}%",
+            reply_markup=get_main_menu(has_key)
+        )
+    except ValueError:
+        await message.answer(
+            "❌ Пожалуйста, введите целое число от 0 до 100"
+        )
 
 
 # ============ Обработчики управления API ключами ============

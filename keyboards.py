@@ -27,6 +27,7 @@ def get_settings_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 Загрузить Excel файл", callback_data="upload_excel")],
         [InlineKeyboardButton(text="📋 Показать текущий файл", callback_data="show_excel_file")],
         [InlineKeyboardButton(text="🗑️ Удалить Excel файл", callback_data="delete_excel_file")],
+        [InlineKeyboardButton(text="📈 Настроить порог скидки", callback_data="set_threshold")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
