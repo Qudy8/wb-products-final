@@ -493,13 +493,17 @@ async def show_page(message_or_callback, user_id: int, page: int):
                     if basic_price > 0:
                         # Рассчитываем скидку на сайте
                         site_discount = ((basic_price - real_price) / basic_price) * 100
-                        # Реальная скидка
+                        # СПП (скидка постоянного покупателя)
                         real_discount = site_discount - seller_discount
 
                         text += f"   📊 Скидка на сайте: {site_discount:.1f}%\n"
                         if seller_discount > 0:
                             text += f"   🔻 Скидка продавца: {seller_discount}%\n"
-                        text += f"   ✅ Реальная скидка: {real_discount:.1f}%\n"
+                        text += f"   ✅ СПП: {real_discount:.1f}%\n"
+
+            # Показываем FBO комиссию из Excel (если есть)
+            if info.get('excel_commission_wb'):
+                text += f"   💼 FBO комиссия: {info['excel_commission_wb']}%\n"
 
             # Показываем FBS комиссию из Excel (если есть)
             if info.get('excel_commission_fbs'):
