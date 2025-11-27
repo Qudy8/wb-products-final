@@ -5,13 +5,9 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 def get_main_menu(has_api_key: bool = False) -> ReplyKeyboardMarkup:
     """Главное меню бота"""
     keyboard = [
+        [KeyboardButton(text="📦 Список товаров")],
         [KeyboardButton(text="⚙️ Настройки")],
     ]
-
-    if has_api_key:
-        keyboard.insert(0, [
-            KeyboardButton(text="📦 Список товаров")
-        ])
 
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
