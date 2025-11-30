@@ -699,30 +699,42 @@ async def upload_excel_process(message: Message, state: FSMContext):
     user_id = message.from_user.id
     document = message.document
 
+    logger.info(f"Получен файл от пользователя {user_id}: {document.file_name}")
+
     # Проверяем расширение файла
     if not document.file_name.endswith(('.xlsx', '.xls')):
+        logger.warning(f"Неверное расширение файла: {document.file_name}")
         await message.answer("❌ Пожалуйста, отправьте файл Excel (.xlsx или .xls)")
         return
 
-    # Создаем папку для файлов если её нет
-    files_dir = "user_files"
-    os.makedirs(files_dir, exist_ok=True)
+    try:
+        # Создаем папку для файлов если её нет
+        files_dir = "user_files"
+        os.makedirs(files_dir, exist_ok=True)
+        logger.info(f"Директория {files_dir} создана/проверена")
 
-    # Формируем путь к файлу
-    file_path = os.path.join(files_dir, f"{user_id}_{document.file_name}")
+        # Формируем путь к файлу
+        file_path = os.path.join(files_dir, f"{user_id}_{document.file_name}")
+        logger.info(f"Путь к файлу: {file_path}")
 
-    # Скачиваем файл
-    await bot.download(document, destination=file_path)
+        # Скачиваем файл
+        await bot.download(document, destination=file_path)
+        logger.info(f"Файл скачан: {file_path}")
 
-    # Сохраняем информацию в БД
-    await db.set_excel_file(user_id, file_path, document.file_name)
+        # Сохраняем информацию в БД
+        await db.set_excel_file(user_id, file_path, document.file_name)
+        logger.info(f"Информация о файле сохранена в БД для пользователя {user_id}")
 
-    await message.answer(
-        f"✅ Excel файл '{document.file_name}' успешно загружен!\n\n"
-        "Файл будет использоваться для работы с товарами.",
-        reply_markup=get_main_menu(await db.has_api_key(user_id))
-    )
-    await state.clear()
+        await message.answer(
+            f"✅ Excel файл '{document.file_name}' успешно загружен!\n\n"
+            "Файл будет использоваться для работы с товарами.",
+            reply_markup=get_main_menu(await db.has_api_key(user_id))
+        )
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке файла: {e}")
+        await message.answer(f"❌ Ошибка при загрузке файла: {str(e)}")
+        await state.clear()
 
 
 # Обработчик показа текущего файла
