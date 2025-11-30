@@ -520,11 +520,11 @@ async def show_page(message_or_callback, user_id: int, page: int):
 
             # Показываем FBO комиссию из Excel (если есть)
             if info.get('excel_commission_wb'):
-                text += f"   💼 FBO комиссия: {info['excel_commission_wb']}%\n"
+                text += f"   💼 FBO комиссия: {info['excel_commission_wb']}\n"
 
             # Показываем FBS комиссию из Excel (если есть)
             if info.get('excel_commission_fbs'):
-                text += f"   💼 FBS комиссия: {info['excel_commission_fbs']}%\n"
+                text += f"   💼 FBS комиссия: {info['excel_commission_fbs']}\n"
 
             text += "\n"
 
