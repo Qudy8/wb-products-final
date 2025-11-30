@@ -13,3 +13,13 @@ ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY')
 
 # WB API endpoints
 WB_API_DISCOUNTS_URL = 'https://discounts-prices-api.wildberries.ru'
+
+# Дефолтные API ключи (доступны всем пользователям)
+DEFAULT_API_KEYS = [
+    os.getenv('DEFAULT_API_KEY_1'),
+    os.getenv('DEFAULT_API_KEY_2'),
+    os.getenv('DEFAULT_API_KEY_3'),
+]
+
+# Фильтруем пустые ключи
+DEFAULT_API_KEYS = [key for key in DEFAULT_API_KEYS if key]

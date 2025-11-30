@@ -91,30 +91,38 @@ async def cmd_start(message: Message):
 @router.message(F.text == "⚙️ Настройки")
 async def settings_menu(message: Message):
     """Отображение меню настроек"""
+    user_id = message.from_user.id
+    use_default_keys = await db.get_use_default_keys(user_id)
+
     await message.answer(
         "⚙️ Настройки бота\n\nВыберите действие:",
-        reply_markup=get_settings_menu()
+        reply_markup=get_settings_menu(use_default_keys)
     )
 
 
 # Обработчик кнопки "Список товаров"
 @router.message(F.text == "📦 Список товаров")
 async def get_products(message: Message):
-    """Получение списка товаров по всем активным ключам"""
+    """Получение списка товаров по всем активным ключам (включая дефолтные)"""
     user_id = message.from_user.id
 
-    # Получаем все активные ключи
-    active_keys = await db.get_active_api_keys(user_id)
+    # Получаем все активные ключи (пользовательские + дефолтные)
+    active_keys = await db.get_active_api_keys_with_defaults(user_id)
 
     if not active_keys:
         await message.answer(
-            "⚠️ Сначала добавьте API ключи в настройках!\n\n"
-            "⚙️ Настройки → 🔑 Управление API ключами",
+            "⚠️ API ключи не настроены. Обратитесь к администратору.",
             reply_markup=get_main_menu(False)
         )
         return
 
-    await message.answer(f"⏳ Обрабатываю {len(active_keys)} активных ключей...")
+    # Считаем ключи для сообщения
+    user_keys_count = len([k for k in active_keys if not k.get('is_default', False)])
+    default_keys_count = len([k for k in active_keys if k.get('is_default', False)])
+    total_keys = len(active_keys)
+
+    # Сообщение показывает общее количество ключей (пользовательские + дефолтные)
+    await message.answer(f"⏳ Обрабатываю {total_keys} активных ключей...")
 
     # Получаем порог скидки пользователя
     user_threshold = await db.get_discount_threshold(user_id)
@@ -135,22 +143,28 @@ async def get_products(message: Message):
 
     # Обрабатываем каждый ключ
     all_key_results = []
+    user_key_idx = 0  # Счетчик для пользовательских ключей
 
-    for key_idx, key_data in enumerate(active_keys, 1):
+    for key_data in active_keys:
         key_name = key_data['name']
         api_key = key_data['key']
+        is_default = key_data.get('is_default', False)
 
-        await message.answer(f"🔑 Обрабатываю ключ {key_idx}/{len(active_keys)}: '{key_name}'...")
+        # Показываем прогресс только для пользовательских ключей
+        if not is_default:
+            user_key_idx += 1
+            await message.answer(f"🔑 Обрабатываю ключ {user_key_idx}/{user_keys_count}: '{key_name}'...")
 
         # Вызываем функцию обработки одного ключа
         key_result = await process_single_key(api_key, key_name, excel_helper, user_threshold)
 
         if key_result:
+            key_result['is_default'] = is_default  # Помечаем результат
             all_key_results.append(key_result)
-            logger.info(f"Ключ '{key_name}': найдено {len(key_result['unique_goods'])} уникальных товаров")
+            logger.info(f"Ключ '{key_name}' (default={is_default}): найдено {len(key_result['unique_goods'])} уникальных товаров")
         else:
             # Добавляем пустой результат для этого ключа
-            logger.info(f"Ключ '{key_name}': товары не найдены")
+            logger.info(f"Ключ '{key_name}' (default={is_default}): товары не найдены")
             all_key_results.append({
                 'key_name': key_name,
                 'stats_text': '',
@@ -159,7 +173,8 @@ async def get_products(message: Message):
                 'real_prices': {},
                 'goods_with_discount': 0,
                 'goods_filtered': 0,
-                'no_results': True  # Флаг что результатов нет
+                'no_results': True,  # Флаг что результатов нет
+                'is_default': is_default
             })
 
     # Сохраняем результаты для пагинации (одна страница = один ключ)
@@ -438,7 +453,14 @@ async def show_page(message_or_callback, user_id: int, page: int):
     result = all_results[page]
 
     # Формируем сообщение для этого ключа
-    text = f"🔑 Ключ: {result['key_name']}\n"
+    is_default = result.get('is_default', False)
+
+    # Для дефолтных ключей не показываем название
+    if not is_default:
+        text = f"🔑 Ключ: {result['key_name']}\n"
+    else:
+        text = ""
+
     text += f"Страница {page + 1}/{len(all_results)}\n\n"
 
     # Проверяем есть ли результаты
@@ -448,12 +470,13 @@ async def show_page(message_or_callback, user_id: int, page: int):
         text += "  • Нет товаров в личном кабинете\n"
         text += f"  • Все товары отфильтрованы по критерию реальной скидки ≥{result.get('threshold', 28)}%\n"
     else:
-        text += result['stats_text']
+        # Статистика убрана для компактности
+        # text += result['stats_text']
 
         # Показываем ВСЕ товары (убираем ограничение [:20])
         goods_to_display = result['unique_goods']
 
-        text += f"\n📦 Товары (всего: {result['total_goods']}, подходит по критерию ≥{result.get('threshold', 28)}%: {result['goods_filtered']}, показано: {len(goods_to_display)})\n\n"
+        text += f"📦 Товары (всего: {result['total_goods']}, подходит по критерию ≥{result.get('threshold', 28)}%: {result['goods_filtered']}, показано: {len(goods_to_display)})\n\n"
 
         # Отображаем товары только если они есть
         for i, product in enumerate(goods_to_display, 1):
@@ -480,10 +503,7 @@ async def show_page(message_or_callback, user_id: int, page: int):
             if info.get('name'):
                 text += f"   📝 {info['name']}\n"
 
-            # Артикул
-            text += f"   🔢 Артикул: {nm_id}\n"
-
-            # Рассчитываем реальную скидку и показываем цены
+            # Рассчитываем реальную скидку и показываем только СПП
             if nm_id != 'N/A':
                 price_data = result['real_prices'].get(nm_id)
                 if price_data:
@@ -496,9 +516,6 @@ async def show_page(message_or_callback, user_id: int, page: int):
                         # СПП (скидка постоянного покупателя)
                         real_discount = site_discount - seller_discount
 
-                        text += f"   📊 Скидка на сайте: {site_discount:.1f}%\n"
-                        if seller_discount > 0:
-                            text += f"   🔻 Скидка продавца: {seller_discount}%\n"
                         text += f"   ✅ СПП: {real_discount:.1f}%\n"
 
             # Показываем FBO комиссию из Excel (если есть)
@@ -512,7 +529,9 @@ async def show_page(message_or_callback, user_id: int, page: int):
             text += "\n"
 
     # Отправляем или редактируем сообщение
-    keyboard = get_pagination_keyboard(page, len(all_results), result['key_name'])
+    # Для дефолтных ключей не передаем название
+    key_name_to_show = None if is_default else result['key_name']
+    keyboard = get_pagination_keyboard(page, len(all_results), key_name_to_show)
 
     # Проверяем тип объекта
     if isinstance(message_or_callback, CallbackQuery):
@@ -639,6 +658,24 @@ async def back_to_menu(callback: CallbackQuery):
         reply_markup=get_main_menu(has_key)
     )
     await callback.answer()
+
+
+# Обработчик переключения дефолтных ключей
+@router.callback_query(F.data == "toggle_default_keys")
+async def toggle_default_keys_handler(callback: CallbackQuery):
+    """Переключение использования системных (дефолтных) ключей"""
+    user_id = callback.from_user.id
+
+    # Переключаем настройку
+    new_state = await db.toggle_default_keys(user_id)
+
+    status_text = "включены ✅" if new_state else "выключены ❌"
+
+    await callback.message.edit_text(
+        f"⚙️ Настройки бота\n\nСистемные ключи теперь {status_text}",
+        reply_markup=get_settings_menu(new_state)
+    )
+    await callback.answer(f"Системные ключи {status_text}")
 
 
 # Обработчик загрузки Excel файла
@@ -814,9 +851,12 @@ async def manage_api_keys(callback: CallbackQuery):
 @router.callback_query(F.data == "back_to_settings")
 async def back_to_settings(callback: CallbackQuery):
     """Возврат в настройки"""
+    user_id = callback.from_user.id
+    use_default_keys = await db.get_use_default_keys(user_id)
+
     await callback.message.edit_text(
         "⚙️ Настройки",
-        reply_markup=get_settings_menu()
+        reply_markup=get_settings_menu(use_default_keys)
     )
     await callback.answer()
 

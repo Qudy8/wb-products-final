@@ -16,10 +16,13 @@ def get_main_menu(has_api_key: bool = False) -> ReplyKeyboardMarkup:
     )
 
 
-def get_settings_menu() -> InlineKeyboardMarkup:
+def get_settings_menu(use_default_keys: bool = True) -> InlineKeyboardMarkup:
     """Меню настроек"""
+    default_keys_text = "🔓 Системные ключи: ВКЛ" if use_default_keys else "🔒 Системные ключи: ВЫКЛ"
+
     keyboard = [
         [InlineKeyboardButton(text="🔑 Управление API ключами", callback_data="manage_api_keys")],
+        [InlineKeyboardButton(text=default_keys_text, callback_data="toggle_default_keys")],
         [InlineKeyboardButton(text="📊 Загрузить Excel файл", callback_data="upload_excel")],
         [InlineKeyboardButton(text="📋 Показать текущий файл", callback_data="show_excel_file")],
         [InlineKeyboardButton(text="🗑️ Удалить Excel файл", callback_data="delete_excel_file")],

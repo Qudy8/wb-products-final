@@ -52,6 +52,9 @@ class Database:
                 if 'discount_threshold' not in column_names:
                     await db.execute('ALTER TABLE users ADD COLUMN discount_threshold INTEGER DEFAULT 28')
 
+                if 'use_default_keys' not in column_names:
+                    await db.execute('ALTER TABLE users ADD COLUMN use_default_keys BOOLEAN DEFAULT 1')
+
             except Exception as e:
                 # Если таблица не существует, она будет создана выше
                 pass
@@ -248,3 +251,56 @@ class Database:
                 if row and row[0] is not None:
                     return row[0]
                 return 28  # значение по умолчанию
+
+    async def get_use_default_keys(self, user_id: int) -> bool:
+        """Проверка, использует ли пользователь дефолтные ключи (по умолчанию True)"""
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                'SELECT use_default_keys FROM users WHERE user_id = ?',
+                (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0] is not None:
+                    return bool(row[0])
+                return True  # по умолчанию включены
+
+    async def toggle_default_keys(self, user_id: int):
+        """Переключение использования дефолтных ключей"""
+        current = await self.get_use_default_keys(user_id)
+        async with aiosqlite.connect(self.db_name) as db:
+            await db.execute(
+                'UPDATE users SET use_default_keys = ? WHERE user_id = ?',
+                (not current, user_id)
+            )
+            await db.commit()
+        return not current
+
+    async def get_active_api_keys_with_defaults(self, user_id: int):
+        """Получение активных API ключей пользователя + дефолтные ключи (если включены)"""
+        from config import DEFAULT_API_KEYS
+
+        # Получаем ключи пользователя
+        user_keys = await self.get_active_api_keys(user_id)
+
+        # Проверяем, нужно ли добавлять дефолтные ключи
+        use_defaults = await self.get_use_default_keys(user_id)
+
+        # Добавляем дефолтные ключи (они не видны пользователю)
+        all_keys = []
+
+        # Сначала добавляем дефолтные ключи (если включены)
+        if use_defaults:
+            for idx, default_key in enumerate(DEFAULT_API_KEYS, 1):
+                all_keys.append({
+                    'id': f'default_{idx}',  # Специальный ID для дефолтных ключей
+                    'name': f'Системный ключ {idx}',
+                    'key': default_key,
+                    'is_default': True  # Флаг что это дефолтный ключ
+                })
+
+        # Затем добавляем пользовательские ключи
+        for key in user_keys:
+            key['is_default'] = False
+            all_keys.append(key)
+
+        return all_keys
