@@ -742,7 +742,9 @@ async def upload_excel_process(message: Message, state: FSMContext):
 async def show_excel_file(callback: CallbackQuery):
     """Показ информации о текущем Excel файле"""
     user_id = callback.from_user.id
+    logger.info(f"show_excel_file вызван для user_id={user_id}")
     file_data = await db.get_excel_file(user_id)
+    logger.info(f"Полученные данные файла: {file_data}")
 
     if file_data:
         file_path, file_name = file_data

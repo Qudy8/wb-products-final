@@ -96,21 +96,45 @@ class Database:
 
     async def set_excel_file(self, user_id: int, file_path: str, file_name: str):
         """Сохранение пути к Excel файлу пользователя"""
+        import logging
+        logger = logging.getLogger(__name__)
+
         async with aiosqlite.connect(self.db_name) as db:
-            await db.execute(
+            # Сначала проверим существует ли пользователь
+            async with db.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,)) as cursor:
+                user_exists = await cursor.fetchone()
+                logger.info(f"set_excel_file: user {user_id} существует в БД: {user_exists is not None}")
+
+            # Если пользователя нет, создаем его
+            if not user_exists:
+                logger.info(f"Создаем пользователя {user_id} в таблице users")
+                await db.execute(
+                    'INSERT INTO users (user_id) VALUES (?)',
+                    (user_id,)
+                )
+
+            logger.info(f"Обновляем Excel файл для user_id={user_id}: path={file_path}, name={file_name}")
+            result = await db.execute(
                 'UPDATE users SET excel_file_path = ?, excel_file_name = ? WHERE user_id = ?',
                 (file_path, file_name, user_id)
             )
+            logger.info(f"UPDATE выполнен, rowcount={result.rowcount}")
             await db.commit()
 
     async def get_excel_file(self, user_id: int) -> tuple[str, str] | None:
         """Получение пути к Excel файлу пользователя"""
+        import logging
+        logger = logging.getLogger(__name__)
+
         async with aiosqlite.connect(self.db_name) as db:
             async with db.execute(
                 'SELECT excel_file_path, excel_file_name FROM users WHERE user_id = ?',
                 (user_id,)
             ) as cursor:
                 row = await cursor.fetchone()
+                logger.info(f"get_excel_file для user_id={user_id}: row={row}")
+                if row:
+                    logger.info(f"excel_file_path={row[0]}, excel_file_name={row[1]}")
                 return (row[0], row[1]) if row and row[0] else None
 
     async def has_excel_file(self, user_id: int) -> bool:
