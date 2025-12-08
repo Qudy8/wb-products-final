@@ -364,14 +364,20 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
                     cards_debug += f" | ID: {received_ids[:3]}..."
                 cards_debug += f" | Цен: {len(real_prices)}"
 
+    # Логируем информацию о получении цен
+    logger.info(f"Ключ '{key_name}': всего товаров {len(goods)}, получено цен {len(real_prices)}")
+
     # Собираем статистику по процентам и фильтруем товары
     goods_to_show_filtered = []
     all_percentages = []  # Для статистики
     debug_count = 0  # Для отладки первых 5 товаров
+    skipped_no_price = 0  # Счетчик товаров без цены
+    skipped_zero_price = 0  # Счетчик товаров с нулевой ценой
 
     for product in goods:
         nm_id = product.get('nmID')
         if nm_id not in real_prices:
+            skipped_no_price += 1
             continue
 
         # Получаем скидку продавца из Discounts API
@@ -386,6 +392,7 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
         basic_price = price_data['basic']  # Базовая цена
 
         if basic_price <= 0:
+            skipped_zero_price += 1
             continue
 
         # Рассчитываем скидку на сайте (в процентах)
@@ -412,6 +419,12 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
 
     # Сортируем товары по проценту разницы (от большего к меньшему)
     all_percentages.sort(reverse=True)
+
+    # Логируем статистику пропущенных товаров
+    logger.info(
+        f"Ключ '{key_name}': пропущено без цены={skipped_no_price}, "
+        f"с нулевой ценой={skipped_zero_price}, обработано={len(all_percentages)}"
+    )
 
     # Формируем статистику
     stats_text = "\n📊 Статистика по реальным скидкам (скидка сайта - скидка продавца):\n"
