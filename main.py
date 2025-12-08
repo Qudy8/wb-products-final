@@ -284,7 +284,12 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
     # Берем ВСЕ товары (не фильтруем по скидкам)
     logger.info(f"Ключ '{key_name}': всего товаров {len(goods)}")
 
+    # Логируем первые 3 товара для отладки
+    if goods:
+        logger.info(f"Ключ '{key_name}': примеры товаров nmID={[g.get('nmID') for g in goods[:3]]}")
+
     if not goods:
+        logger.warning(f"Ключ '{key_name}': список товаров пуст после получения от API")
         return None
 
     # Получаем реальные цены с сайта WB для ВСЕХ товаров
@@ -305,8 +310,10 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
     else:
         response_data = cards_result.get('data', {})
 
-        # Проверяем структуру ответа
-        # Cards API возвращает {'data': {'products': [...]}}
+        # Логируем полную структуру для отладки
+        logger.info(f"Cards API v4 структура ответа: ключи={list(response_data.keys())}")
+
+        # Cards API v4 возвращает {'products': [...]}
         if 'products' in response_data:
             # Прямой доступ: data.products
             products = response_data.get('products', [])
@@ -318,12 +325,12 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
                 if nm_id:
                     received_ids.append(nm_id)
 
-                # Цена находится в sizes[0].price.product и sizes[0].price.basic
+                # В v4 API цена находится в sizes[0].price
                 sizes = card.get('sizes', [])
                 if sizes and len(sizes) > 0:
                     price_data = sizes[0].get('price', {})
                     # product - цена со скидкой на сайте, basic - базовая цена
-                    product_price = price_data.get('product') or price_data.get('total', 0)
+                    product_price = price_data.get('product', 0)
                     basic_price = price_data.get('basic', product_price)
 
                     if nm_id and product_price > 0:
@@ -363,6 +370,7 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
 
     # Логируем информацию о получении цен
     logger.info(f"Ключ '{key_name}': всего товаров {len(goods)}, получено цен {len(real_prices)}")
+    logger.info(f"Cards API debug: {cards_debug}")
 
     # Собираем статистику по процентам и фильтруем товары
     goods_to_show_filtered = []
@@ -481,6 +489,8 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
     logger.info(f"Ключ '{key_name}': после фильтра ≥{threshold}% осталось {len(goods_to_show_filtered)} товаров")
 
     if not goods_to_show_filtered:
+        logger.warning(f"Ключ '{key_name}': нет товаров после фильтрации по порогу {threshold}%")
+        logger.info(f"Ключ '{key_name}': топ-5 скидок до фильтрации: {[(pct, nm_id) for pct, nm_id in all_percentages[:5]]}")
         return None
 
     # Фильтруем дубликаты по категории+предмету

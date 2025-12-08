@@ -2,8 +2,11 @@
 import aiohttp
 import ssl
 import requests
+import logging
 from typing import Dict, List
 from config import WB_API_DISCOUNTS_URL
+
+logger = logging.getLogger(__name__)
 
 
 class WildberriesAPI:
@@ -61,37 +64,58 @@ class WildberriesAPI:
 
     def _get_cards_detail_sync(self, nm_ids: List[int]) -> Dict:
         """
-        Синхронный метод для получения данных от Cards API через requests
+        Синхронный метод для получения данных от Cards API v4 через requests
+        Использует актуальное публичное API Wildberries card.wb.ru/cards/v4/detail
         """
-        url = 'https://card.wb.ru/cards/v2/detail'
+        # Используем актуальный endpoint v4
+        url = 'https://card.wb.ru/cards/v4/detail'
 
         nm_string = ';'.join(map(str, nm_ids))
         params = {
             'appType': 1,
             'curr': 'rub',
-            'dest': -1257786,
+            'dest': -428431,
             'spp': 30,
+            'ab_testing': 'false',
+            'lang': 'ru',
             'nm': nm_string
         }
 
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': '*/*'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'ru-RU,ru;q=0.9',
+            'Origin': 'https://www.wildberries.ru',
+            'Referer': 'https://www.wildberries.ru/'
         }
 
         try:
+            logger.info(f"Cards API v4 запрос: {len(nm_ids)} товаров, URL: {url}")
+            logger.info(f"Cards API v4 параметры: nm={nm_string[:100]}...")
             response = requests.get(url, params=params, headers=headers, verify=False, timeout=30)
+            logger.info(f"Cards API v4 ответ: status={response.status_code}, размер={len(response.text)} байт")
+
             if response.status_code == 200:
+                json_data = response.json()
+                logger.info(f"Catalog API JSON ключи верхнего уровня: {list(json_data.keys())}")
+
+                # Логируем структуру для отладки
+                if 'data' in json_data:
+                    data_keys = list(json_data['data'].keys()) if isinstance(json_data['data'], dict) else 'NOT_DICT'
+                    logger.info(f"Catalog API JSON['data'] ключи: {data_keys}")
+
                 return {
                     'success': True,
-                    'data': response.json()
+                    'data': json_data
                 }
             else:
+                logger.error(f"Catalog API ошибка {response.status_code}: {response.text[:200]}")
                 return {
                     'success': False,
                     'error': f'HTTP {response.status_code}: {response.text[:200]}'
                 }
         except Exception as e:
+            logger.error(f"Catalog API exception: {str(e)}")
             return {
                 'success': False,
                 'error': f'Connection error: {str(e)}'
