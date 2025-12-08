@@ -306,63 +306,60 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
         response_data = cards_result.get('data', {})
 
         # Проверяем структуру ответа
-        if 'data' not in response_data:
-            cards_debug = f"❌ Нет ключа 'data'. Ключи: {list(response_data.keys())[:5]}"
-        else:
-            products_data = response_data.get('data', {})
+        # Cards API возвращает {'data': {'products': [...]}}
+        if 'products' in response_data:
+            # Прямой доступ: data.products
+            products = response_data.get('products', [])
+            cards_debug = f"✅ Товаров получено: {len(products)}"
+            received_ids = []
 
-            if 'products' not in products_data:
-                cards_debug = f"❌ Нет ключа 'products'. Ключи: {list(products_data.keys())[:5]}"
-            else:
-                products = products_data.get('products', [])
-                cards_debug = f"✅ Товаров получено: {len(products)}"
-                received_ids = []
+            for card in products:
+                nm_id = card.get('id')
+                if nm_id:
+                    received_ids.append(nm_id)
 
-                for card in products:
-                    nm_id = card.get('id')
-                    if nm_id:
-                        received_ids.append(nm_id)
+                # Цена находится в sizes[0].price.product и sizes[0].price.basic
+                sizes = card.get('sizes', [])
+                if sizes and len(sizes) > 0:
+                    price_data = sizes[0].get('price', {})
+                    # product - цена со скидкой на сайте, basic - базовая цена
+                    product_price = price_data.get('product') or price_data.get('total', 0)
+                    basic_price = price_data.get('basic', product_price)
 
-                    # Цена находится в sizes[0].price.product и sizes[0].price.basic
-                    sizes = card.get('sizes', [])
-                    if sizes and len(sizes) > 0:
-                        price_data = sizes[0].get('price', {})
-                        # product - цена со скидкой на сайте, basic - базовая цена
-                        product_price = price_data.get('product') or price_data.get('total', 0)
-                        basic_price = price_data.get('basic', product_price)
-
-                        if nm_id and product_price > 0:
-                            # Цена в формате копейки * 100, делим на 100 для получения рублей
-                            real_prices[nm_id] = {
-                                'real': product_price / 100,
-                                'basic': basic_price / 100
-                            }
-
-                    # Сохраняем информацию о предмете, категории и бренде
-                    if nm_id:
-                        entity = card.get('entity', '')
-                        product_info[nm_id] = {
-                            'entity': entity,  # Предмет
-                            'brand': card.get('brand', ''),    # Бренд
-                            'name': card.get('name', ''),      # Наименование товара
-                            'subject_id': card.get('subjectId', ''),
-                            'subject_parent_id': card.get('subjectParentId', '')  # ID категории
+                    if nm_id and product_price > 0:
+                        # Цена в формате копейки * 100, делим на 100 для получения рублей
+                        real_prices[nm_id] = {
+                            'real': product_price / 100,
+                            'basic': basic_price / 100
                         }
 
-                        # Ищем соответствие в Excel файле
-                        if excel_helper and entity:
-                            excel_data = excel_helper.find_by_subject(entity)
-                            if excel_data:
-                                product_info[nm_id]['excel_category'] = excel_data['category']
-                                product_info[nm_id]['excel_subject'] = excel_data['subject']
-                                product_info[nm_id]['excel_commission_wb'] = excel_data.get('commission_wb', '')
-                                product_info[nm_id]['excel_commission_fbs'] = excel_data.get('commission_fbs', '')
-                                product_info[nm_id]['excel_commission_self'] = excel_data.get('commission_self', '')
+                # Сохраняем информацию о предмете, категории и бренде
+                if nm_id:
+                    entity = card.get('entity', '')
+                    product_info[nm_id] = {
+                        'entity': entity,  # Предмет
+                        'brand': card.get('brand', ''),    # Бренд
+                        'name': card.get('name', ''),      # Наименование товара
+                        'subject_id': card.get('subjectId', ''),
+                        'subject_parent_id': card.get('subjectParentId', '')  # ID категории
+                    }
 
-                # Отладка: показываем первые ID
-                if received_ids:
-                    cards_debug += f" | ID: {received_ids[:3]}..."
-                cards_debug += f" | Цен: {len(real_prices)}"
+                    # Ищем соответствие в Excel файле
+                    if excel_helper and entity:
+                        excel_data = excel_helper.find_by_subject(entity)
+                        if excel_data:
+                            product_info[nm_id]['excel_category'] = excel_data['category']
+                            product_info[nm_id]['excel_subject'] = excel_data['subject']
+                            product_info[nm_id]['excel_commission_wb'] = excel_data.get('commission_wb', '')
+                            product_info[nm_id]['excel_commission_fbs'] = excel_data.get('commission_fbs', '')
+                            product_info[nm_id]['excel_commission_self'] = excel_data.get('commission_self', '')
+
+            # Отладка: показываем первые ID
+            if received_ids:
+                cards_debug += f" | ID: {received_ids[:3]}..."
+            cards_debug += f" | Цен: {len(real_prices)}"
+        else:
+            cards_debug = f"❌ Нет ключа 'products'. Ключи: {list(response_data.keys())[:5]}"
 
     # Логируем информацию о получении цен
     logger.info(f"Ключ '{key_name}': всего товаров {len(goods)}, получено цен {len(real_prices)}")
