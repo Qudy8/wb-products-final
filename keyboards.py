@@ -13,8 +13,7 @@ def get_main_menu(has_subscription: bool = False) -> ReplyKeyboardMarkup:
         # Полное меню для пользователей с подпиской
         keyboard = [
             [KeyboardButton(text="📦 Список товаров")],
-            [KeyboardButton(text="💳 Подписка")],
-            [KeyboardButton(text="⚙️ Настройки")],
+            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="💳 Подписка")],
         ]
         placeholder = "Выберите действие"
     else:
