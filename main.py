@@ -367,6 +367,7 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
     # Собираем статистику по процентам и фильтруем товары
     goods_to_show_filtered = []
     all_percentages = []  # Для статистики
+    debug_count = 0  # Для отладки первых 5 товаров
 
     for product in goods:
         nm_id = product.get('nmID')
@@ -392,6 +393,15 @@ async def process_single_key(api_key: str, key_name: str, excel_helper, threshol
 
         # Рассчитываем реальную скидку: скидка_сайта - скидка_продавца
         real_discount = site_discount - seller_discount
+
+        # Детальное логирование для первых 5 товаров
+        if debug_count < 5:
+            logger.info(
+                f"Товар {nm_id}: basic={basic_price:.2f}₽, real={real_price:.2f}₽, "
+                f"site_discount={site_discount:.1f}%, seller_discount={seller_discount}%, "
+                f"real_discount={real_discount:.1f}%"
+            )
+            debug_count += 1
 
         # Сохраняем для статистики
         all_percentages.append((real_discount, nm_id))
