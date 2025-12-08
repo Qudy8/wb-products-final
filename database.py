@@ -36,6 +36,61 @@ class Database:
                 )
             ''')
 
+            # Таблица для хранения подписок
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    plan_id TEXT,
+                    yandex_order_id TEXT UNIQUE,
+                    status TEXT DEFAULT 'pending',
+                    amount TEXT,
+                    start_date TIMESTAMP,
+                    end_date TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            ''')
+
+            # Таблица для хранения платежей ЮKassa
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    payment_id TEXT UNIQUE,
+                    plan_id TEXT,
+                    amount TEXT,
+                    currency TEXT DEFAULT 'RUB',
+                    status TEXT DEFAULT 'pending',
+                    paid BOOLEAN DEFAULT 0,
+                    test BOOLEAN DEFAULT 0,
+                    description TEXT,
+                    confirmation_url TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            ''')
+
+            # Таблица для хранения привязанных платежных методов (карт)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS payment_methods (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    payment_method_id TEXT UNIQUE,
+                    payment_method_type TEXT,
+                    card_last4 TEXT,
+                    card_first6 TEXT,
+                    card_type TEXT,
+                    card_expiry_month TEXT,
+                    card_expiry_year TEXT,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            ''')
+
             # Миграция: добавляем новые столбцы если их нет
             try:
                 # Проверяем наличие столбца excel_file_path
@@ -328,3 +383,360 @@ class Database:
             all_keys.append(key)
 
         return all_keys
+
+    # Методы для работы с подписками
+    async def create_subscription(self, user_id: int, plan_id: str, yandex_order_id: str, amount: str):
+        """Создание новой подписки"""
+        async with aiosqlite.connect(self.db_name) as db:
+            await db.execute(
+                '''INSERT INTO subscriptions
+                   (user_id, plan_id, yandex_order_id, amount, status)
+                   VALUES (?, ?, ?, ?, 'pending')''',
+                (user_id, plan_id, yandex_order_id, amount)
+            )
+            await db.commit()
+
+    async def activate_subscription(self, yandex_order_id: str):
+        """Активация подписки после успешной оплаты"""
+        from datetime import datetime, timedelta
+        from config import SUBSCRIPTION_PLANS
+
+        async with aiosqlite.connect(self.db_name) as db:
+            # Получаем информацию о новой подписке
+            async with db.execute(
+                'SELECT user_id, plan_id FROM subscriptions WHERE yandex_order_id = ?',
+                (yandex_order_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return False
+
+                user_id = row[0]
+                plan_id = row[1]
+                plan = SUBSCRIPTION_PLANS.get(plan_id)
+                if not plan:
+                    return False
+
+                # Проверяем, есть ли активная подписка
+                async with db.execute(
+                    '''SELECT end_date FROM subscriptions
+                       WHERE user_id = ? AND status = 'active' AND end_date > ?
+                       ORDER BY end_date DESC LIMIT 1''',
+                    (user_id, datetime.now())
+                ) as active_cursor:
+                    active_row = await active_cursor.fetchone()
+
+                    if active_row:
+                        # Есть активная подписка - продлеваем от её даты окончания
+                        current_end_date = datetime.fromisoformat(active_row[0])
+                        start_date = current_end_date
+                        end_date = start_date + timedelta(days=plan['duration_days'])
+                    else:
+                        # Нет активной подписки - начинаем с текущего момента
+                        start_date = datetime.now()
+                        end_date = start_date + timedelta(days=plan['duration_days'])
+
+                # Обновляем подписку
+                await db.execute(
+                    '''UPDATE subscriptions
+                       SET status = 'active', start_date = ?, end_date = ?, updated_at = ?
+                       WHERE yandex_order_id = ?''',
+                    (start_date, end_date, datetime.now(), yandex_order_id)
+                )
+                await db.commit()
+                return True
+
+    async def get_active_subscription(self, user_id: int):
+        """Получение активной подписки пользователя"""
+        from datetime import datetime
+
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                '''SELECT id, plan_id, start_date, end_date
+                   FROM subscriptions
+                   WHERE user_id = ? AND status = 'active' AND end_date > ?
+                   ORDER BY end_date DESC LIMIT 1''',
+                (user_id, datetime.now())
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return {
+                        'id': row[0],
+                        'plan_id': row[1],
+                        'start_date': row[2],
+                        'end_date': row[3]
+                    }
+                return None
+
+    async def has_active_subscription(self, user_id: int) -> bool:
+        """Проверка наличия активной подписки"""
+        subscription = await self.get_active_subscription(user_id)
+        return subscription is not None
+
+    async def cancel_subscription(self, yandex_order_id: str):
+        """Отмена подписки"""
+        from datetime import datetime
+
+        async with aiosqlite.connect(self.db_name) as db:
+            await db.execute(
+                '''UPDATE subscriptions
+                   SET status = 'cancelled', updated_at = ?
+                   WHERE yandex_order_id = ?''',
+                (datetime.now(), yandex_order_id)
+            )
+            await db.commit()
+
+    async def get_subscription_by_order_id(self, yandex_order_id: str):
+        """Получение подписки по ID заказа Яндекс Пэй"""
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                '''SELECT id, user_id, plan_id, status, amount, start_date, end_date
+                   FROM subscriptions WHERE yandex_order_id = ?''',
+                (yandex_order_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return {
+                        'id': row[0],
+                        'user_id': row[1],
+                        'plan_id': row[2],
+                        'status': row[3],
+                        'amount': row[4],
+                        'start_date': row[5],
+                        'end_date': row[6]
+                    }
+                return None
+
+    async def create_trial_subscription(self, user_id: int):
+        """Создание пробной подписки на 1 день для нового пользователя"""
+        from datetime import datetime, timedelta
+        import time
+
+        # Проверяем, есть ли уже подписка (активная или истекшая)
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                'SELECT COUNT(*) FROM subscriptions WHERE user_id = ?',
+                (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0] > 0:
+                    # У пользователя уже была подписка, не даем пробную
+                    return False
+
+            # Создаем пробную подписку
+            start_date = datetime.now()
+            end_date = start_date + timedelta(days=1)
+            order_id = f"trial_{user_id}_{int(time.time())}"
+
+            await db.execute(
+                '''INSERT INTO subscriptions
+                   (user_id, plan_id, yandex_order_id, amount, status, start_date, end_date)
+                   VALUES (?, 'trial', ?, '0.00', 'active', ?, ?)''',
+                (user_id, order_id, start_date, end_date)
+            )
+            await db.commit()
+            return True
+
+    # Методы для работы с платежами ЮKassa
+    async def create_payment(self, user_id: int, payment_id: str, plan_id: str,
+                            amount: str, description: str, confirmation_url: str, test: bool = False):
+        """Создание записи о платеже"""
+        from datetime import datetime
+
+        async with aiosqlite.connect(self.db_name) as db:
+            await db.execute(
+                '''INSERT INTO payments
+                   (user_id, payment_id, plan_id, amount, description, confirmation_url, test, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                (user_id, payment_id, plan_id, amount, description, confirmation_url, test, datetime.now())
+            )
+            await db.commit()
+
+    async def update_payment_status(self, payment_id: str, status: str, paid: bool):
+        """Обновление статуса платежа"""
+        from datetime import datetime
+
+        async with aiosqlite.connect(self.db_name) as db:
+            await db.execute(
+                '''UPDATE payments
+                   SET status = ?, paid = ?, updated_at = ?
+                   WHERE payment_id = ?''',
+                (status, paid, datetime.now(), payment_id)
+            )
+            await db.commit()
+
+    async def get_payment_by_id(self, payment_id: str):
+        """Получение платежа по ID"""
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                '''SELECT id, user_id, payment_id, plan_id, amount, status, paid, test, description, confirmation_url, created_at
+                   FROM payments WHERE payment_id = ?''',
+                (payment_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return {
+                        'id': row[0],
+                        'user_id': row[1],
+                        'payment_id': row[2],
+                        'plan_id': row[3],
+                        'amount': row[4],
+                        'status': row[5],
+                        'paid': bool(row[6]),
+                        'test': bool(row[7]),
+                        'description': row[8],
+                        'confirmation_url': row[9],
+                        'created_at': row[10]
+                    }
+                return None
+
+    async def get_user_payments(self, user_id: int, limit: int = 10):
+        """Получение последних платежей пользователя"""
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                '''SELECT payment_id, plan_id, amount, status, paid, created_at
+                   FROM payments
+                   WHERE user_id = ?
+                   ORDER BY created_at DESC
+                   LIMIT ?''',
+                (user_id, limit)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [{
+                    'payment_id': row[0],
+                    'plan_id': row[1],
+                    'amount': row[2],
+                    'status': row[3],
+                    'paid': bool(row[4]),
+                    'created_at': row[5]
+                } for row in rows]
+
+    # Методы для работы с платежными методами (привязанными картами)
+    async def save_payment_method(self, user_id: int, payment_method_id: str, payment_method_type: str,
+                                  card_data: dict = None):
+        """Сохранение платежного метода"""
+        from datetime import datetime
+
+        async with aiosqlite.connect(self.db_name) as db:
+            if card_data:
+                await db.execute(
+                    '''INSERT OR REPLACE INTO payment_methods
+                       (user_id, payment_method_id, payment_method_type, card_last4, card_first6,
+                        card_type, card_expiry_month, card_expiry_year, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (user_id, payment_method_id, payment_method_type,
+                     card_data.get('last4'), card_data.get('first6'), card_data.get('card_type'),
+                     card_data.get('expiry_month'), card_data.get('expiry_year'), datetime.now())
+                )
+            else:
+                await db.execute(
+                    '''INSERT OR REPLACE INTO payment_methods
+                       (user_id, payment_method_id, payment_method_type, created_at)
+                       VALUES (?, ?, ?, ?)''',
+                    (user_id, payment_method_id, payment_method_type, datetime.now())
+                )
+            await db.commit()
+
+    async def get_user_payment_methods(self, user_id: int):
+        """Получение всех активных платежных методов пользователя"""
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                '''SELECT id, payment_method_id, payment_method_type, card_last4, card_first6,
+                          card_type, card_expiry_month, card_expiry_year, created_at
+                   FROM payment_methods
+                   WHERE user_id = ? AND is_active = 1
+                   ORDER BY created_at DESC''',
+                (user_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [{
+                    'id': row[0],
+                    'payment_method_id': row[1],
+                    'type': row[2],
+                    'card_last4': row[3],
+                    'card_first6': row[4],
+                    'card_type': row[5],
+                    'card_expiry_month': row[6],
+                    'card_expiry_year': row[7],
+                    'created_at': row[8]
+                } for row in rows]
+
+    async def delete_payment_method(self, payment_method_id: str):
+        """Удаление (деактивация) платежного метода"""
+        async with aiosqlite.connect(self.db_name) as db:
+            await db.execute(
+                'UPDATE payment_methods SET is_active = 0 WHERE payment_method_id = ?',
+                (payment_method_id,)
+            )
+            await db.commit()
+
+    async def get_payment_method_by_id(self, payment_method_id: str):
+        """Получение платежного метода по ID"""
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                '''SELECT id, user_id, payment_method_id, payment_method_type, card_last4, card_first6,
+                          card_type, card_expiry_month, card_expiry_year, is_active
+                   FROM payment_methods WHERE payment_method_id = ?''',
+                (payment_method_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return {
+                        'id': row[0],
+                        'user_id': row[1],
+                        'payment_method_id': row[2],
+                        'type': row[3],
+                        'card_last4': row[4],
+                        'card_first6': row[5],
+                        'card_type': row[6],
+                        'card_expiry_month': row[7],
+                        'card_expiry_year': row[8],
+                        'is_active': bool(row[9])
+                    }
+                return None
+
+    async def activate_subscription_yukassa(self, payment_id: str):
+        """Активация подписки после успешной оплаты через ЮKassa"""
+        from datetime import datetime, timedelta
+        from config import SUBSCRIPTION_PLANS
+
+        async with aiosqlite.connect(self.db_name) as db:
+            # Получаем информацию о платеже
+            payment = await self.get_payment_by_id(payment_id)
+            if not payment:
+                return False
+
+            user_id = payment['user_id']
+            plan_id = payment['plan_id']
+            plan = SUBSCRIPTION_PLANS.get(plan_id)
+            if not plan:
+                return False
+
+            # Проверяем, есть ли активная подписка
+            async with db.execute(
+                '''SELECT end_date FROM subscriptions
+                   WHERE user_id = ? AND status = 'active' AND end_date > ?
+                   ORDER BY end_date DESC LIMIT 1''',
+                (user_id, datetime.now())
+            ) as active_cursor:
+                active_row = await active_cursor.fetchone()
+
+                if active_row:
+                    # Есть активная подписка - продлеваем от её даты окончания
+                    current_end_date = datetime.fromisoformat(active_row[0])
+                    start_date = current_end_date
+                    end_date = start_date + timedelta(days=plan['duration_days'])
+                else:
+                    # Нет активной подписки - начинаем с текущего момента
+                    start_date = datetime.now()
+                    end_date = start_date + timedelta(days=plan['duration_days'])
+
+            # Создаем новую подписку
+            await db.execute(
+                '''INSERT INTO subscriptions
+                   (user_id, plan_id, yandex_order_id, amount, status, start_date, end_date, created_at)
+                   VALUES (?, ?, ?, ?, 'active', ?, ?, ?)''',
+                (user_id, plan_id, payment_id, payment['amount'], start_date, end_date, datetime.now())
+            )
+            await db.commit()
+            return True

@@ -23,3 +23,18 @@ DEFAULT_API_KEYS = [
 
 # Фильтруем пустые ключи
 DEFAULT_API_KEYS = [key for key in DEFAULT_API_KEYS if key]
+
+# ЮKassa конфигурация
+YUKASSA_SHOP_ID = os.getenv('YUKASSA_SHOP_ID')
+YUKASSA_SECRET_KEY = os.getenv('YUKASSA_SECRET_KEY')
+YUKASSA_TEST_MODE = os.getenv('YUKASSA_TEST_MODE', 'True') == 'True'
+
+# Тарифные планы подписки
+SUBSCRIPTION_PLANS = {
+    '1_month': {
+        'name': '1 месяц',
+        'duration_days': 30,
+        'price': '599.00',
+        'description': 'Подписка на 1 месяц'
+    }
+}

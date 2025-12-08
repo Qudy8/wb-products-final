@@ -21,8 +21,16 @@ from keyboards import (
     get_api_keys_list_keyboard,
     get_key_actions_keyboard,
     get_confirm_delete_keyboard,
-    get_pagination_keyboard
+    get_pagination_keyboard,
+    get_subscription_menu,
+    get_subscription_status_keyboard,
+    get_payment_methods_keyboard,
+    get_card_actions_keyboard,
+    get_confirm_unbind_card_keyboard,
+    get_subscription_with_cards_keyboard
 )
+from yukassa_payment import YuKassaPayment
+from config import SUBSCRIPTION_PLANS
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -76,15 +84,56 @@ async def cmd_start(message: Message):
     await db.add_user(user_id, username)
     has_key = await db.has_api_key(user_id)
 
-    await message.answer(
-        "👋 Добро пожаловать в WB Management Bot!\n\n"
-        "Этот бот поможет вам работать с товарами на Wildberries.\n\n"
-        "Доступные функции:\n"
-        "📦 Получение списка товаров с ценами и скидками\n"
-        "⚙️ Настройка API ключа\n\n"
-        f"{'✅ API ключ установлен' if has_key else '⚠️ Для начала работы установите WB API ключ в настройках'}",
-        reply_markup=get_main_menu(has_key)
-    )
+    # Проверяем активную подписку
+    subscription = await db.get_active_subscription(user_id)
+
+    # Если подписки нет, пытаемся дать пробную
+    if not subscription:
+        trial_created = await db.create_trial_subscription(user_id)
+        if trial_created:
+            # Пробная подписка успешно создана
+            subscription = await db.get_active_subscription(user_id)
+            await message.answer(
+                "🎉 Добро пожаловать в WB Management Bot!\n\n"
+                "✨ Вам активирован пробный период на 1 день!\n\n"
+                "Доступные функции:\n"
+                "📦 Получение списка товаров с ценами и скидками\n"
+                "📊 Загрузка Excel файла с категориями\n"
+                "⚙️ Настройка API ключей\n"
+                "💳 Управление подпиской\n\n"
+                "После окончания пробного периода для продолжения работы необходимо оформить подписку.",
+                reply_markup=get_main_menu(True)  # У пользователя теперь есть подписка
+            )
+            return
+
+    # У пользователя есть активная подписка
+    if subscription:
+        from datetime import datetime
+        end_date = datetime.fromisoformat(subscription['end_date'])
+        days_left = (end_date - datetime.now()).days + 1
+
+        plan_name = "Пробный период" if subscription['plan_id'] == 'trial' else SUBSCRIPTION_PLANS.get(subscription['plan_id'], {}).get('name', 'Неизвестный план')
+
+        await message.answer(
+            f"👋 С возвращением!\n\n"
+            f"📋 Подписка: {plan_name}\n"
+            f"⏰ Осталось дней: {days_left}\n\n"
+            "Доступные функции:\n"
+            "📦 Получение списка товаров с ценами и скидками\n"
+            "📊 Загрузка Excel файла с категориями\n"
+            "⚙️ Настройка API ключей\n"
+            "💳 Управление подпиской",
+            reply_markup=get_main_menu(True)  # У пользователя есть активная подписка
+        )
+    else:
+        # Пробный период уже был использован, нужна оплата
+        await message.answer(
+            "👋 Добро пожаловать в WB Management Bot!\n\n"
+            "⚠️ У вас нет активной подписки.\n\n"
+            "Этот бот работает по подписке. Для доступа к функциям необходимо оформить подписку.\n\n"
+            "Нажмите '💳 Подписка' для выбора тарифного плана.",
+            reply_markup=get_main_menu(False)  # Нет активной подписки
+        )
 
 
 # Обработчик кнопки "Настройки"
@@ -92,10 +141,21 @@ async def cmd_start(message: Message):
 async def settings_menu(message: Message):
     """Отображение меню настроек"""
     user_id = message.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await message.answer(
+            "⚠️ Для доступа к настройкам необходима активная подписка.\n\n"
+            "Нажмите '💳 Подписка' для оформления.",
+            reply_markup=get_main_menu(False)
+        )
+        return
+
     use_default_keys = await db.get_use_default_keys(user_id)
 
     await message.answer(
-        "⚙️ Настройки бота\n\nВыберите действие:",
+        "⚙️ Настройки бота\n\n"
+        "Выберите раздел для настройки:",
         reply_markup=get_settings_menu(use_default_keys)
     )
 
@@ -105,6 +165,15 @@ async def settings_menu(message: Message):
 async def get_products(message: Message):
     """Получение списка товаров по всем активным ключам (включая дефолтные)"""
     user_id = message.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await message.answer(
+            "⚠️ Для доступа к этой функции необходима активная подписка.\n\n"
+            "Нажмите '💳 Подписка' для оформления.",
+            reply_markup=get_main_menu(False)
+        )
+        return
 
     # Получаем все активные ключи (пользовательские + дефолтные)
     active_keys = await db.get_active_api_keys_with_defaults(user_id)
@@ -552,8 +621,14 @@ async def show_page(message_or_callback, user_id: int, page: int):
 @router.callback_query(F.data.startswith("page:"))
 async def pagination_handler(callback: CallbackQuery):
     """Обработчик кнопок пагинации"""
-    page = int(callback.data.split(":")[1])
     user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
+    page = int(callback.data.split(":")[1])
 
     await show_page(callback, user_id, page)
     await callback.answer()
@@ -607,12 +682,12 @@ async def set_api_key_process(message: Message, state: FSMContext):
 async def cancel_action(message: Message, state: FSMContext):
     """Отмена текущего действия"""
     user_id = message.from_user.id
-    has_key = await db.has_api_key(user_id)
+    has_subscription = await db.has_active_subscription(user_id)
 
     await state.clear()
     await message.answer(
         "❌ Действие отменено",
-        reply_markup=get_main_menu(has_key)
+        reply_markup=get_main_menu(has_subscription)
     )
 
 
@@ -651,13 +726,15 @@ async def delete_api_key(callback: CallbackQuery):
 async def back_to_menu(callback: CallbackQuery):
     """Возврат в главное меню"""
     user_id = callback.from_user.id
-    has_key = await db.has_api_key(user_id)
+    has_subscription = await db.has_active_subscription(user_id)
 
-    await callback.message.answer(
-        "Главное меню",
-        reply_markup=get_main_menu(has_key)
-    )
-    await callback.answer()
+    # Удаляем предыдущее сообщение
+    try:
+        await callback.message.delete()
+    except:
+        pass
+
+    await callback.answer("✅ Возврат в главное меню")
 
 
 # Обработчик переключения дефолтных ключей
@@ -665,6 +742,11 @@ async def back_to_menu(callback: CallbackQuery):
 async def toggle_default_keys_handler(callback: CallbackQuery):
     """Переключение использования системных (дефолтных) ключей"""
     user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
 
     # Переключаем настройку
     new_state = await db.toggle_default_keys(user_id)
@@ -682,6 +764,13 @@ async def toggle_default_keys_handler(callback: CallbackQuery):
 @router.callback_query(F.data == "upload_excel")
 async def upload_excel_start(callback: CallbackQuery, state: FSMContext):
     """Начало процесса загрузки Excel файла"""
+    user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     await callback.message.answer(
         "📊 Отправьте Excel файл (.xlsx или .xls)\n\n"
         "Этот файл будет использоваться для работы с товарами.\n"
@@ -728,7 +817,7 @@ async def upload_excel_process(message: Message, state: FSMContext):
         await message.answer(
             f"✅ Excel файл '{document.file_name}' успешно загружен!\n\n"
             "Файл будет использоваться для работы с товарами.",
-            reply_markup=get_main_menu(await db.has_api_key(user_id))
+            reply_markup=get_main_menu(True)  # Пользователь с подпиской
         )
         await state.clear()
     except Exception as e:
@@ -742,6 +831,12 @@ async def upload_excel_process(message: Message, state: FSMContext):
 async def show_excel_file(callback: CallbackQuery):
     """Показ информации о текущем Excel файле"""
     user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     logger.info(f"show_excel_file вызван для user_id={user_id}")
     file_data = await db.get_excel_file(user_id)
     logger.info(f"Полученные данные файла: {file_data}")
@@ -771,6 +866,12 @@ async def show_excel_file(callback: CallbackQuery):
 async def delete_excel_file(callback: CallbackQuery):
     """Удаление Excel файла"""
     user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     file_data = await db.get_excel_file(user_id)
 
     if file_data:
@@ -784,7 +885,7 @@ async def delete_excel_file(callback: CallbackQuery):
 
         await callback.message.answer(
             f"🗑️ Excel файл '{file_name}' удален",
-            reply_markup=get_main_menu(await db.has_api_key(user_id))
+            reply_markup=get_main_menu(True)  # Пользователь с подпиской
         )
     else:
         await callback.message.answer("⚠️ Excel файл не найден")
@@ -798,6 +899,12 @@ async def delete_excel_file(callback: CallbackQuery):
 async def set_threshold_start(callback: CallbackQuery, state: FSMContext):
     """Начало процесса настройки порога скидки"""
     user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     current_threshold = await db.get_discount_threshold(user_id)
 
     await callback.message.answer(
@@ -816,10 +923,10 @@ async def set_threshold_process(message: Message, state: FSMContext):
     """Обработка нового значения порога"""
     if message.text == "❌ Отмена":
         await state.clear()
-        has_key = await db.has_api_key(message.from_user.id)
+        has_subscription = await db.has_active_subscription(message.from_user.id)
         await message.answer(
             "Настройка порога отменена",
-            reply_markup=get_main_menu(has_key)
+            reply_markup=get_main_menu(has_subscription)
         )
         return
 
@@ -835,12 +942,11 @@ async def set_threshold_process(message: Message, state: FSMContext):
         await db.set_discount_threshold(user_id, threshold)
         await state.clear()
 
-        has_key = await db.has_api_key(user_id)
         await message.answer(
             f"✅ Порог скидки установлен: {threshold}%\n\n"
             f"Теперь при поиске товаров будут показаны только те, "
             f"у которых реальная скидка >= {threshold}%",
-            reply_markup=get_main_menu(has_key)
+            reply_markup=get_main_menu(True)  # Пользователь с подпиской
         )
     except ValueError:
         await message.answer(
@@ -853,6 +959,13 @@ async def set_threshold_process(message: Message, state: FSMContext):
 @router.callback_query(F.data == "manage_api_keys")
 async def manage_api_keys(callback: CallbackQuery):
     """Меню управления API ключами"""
+    user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     await callback.message.edit_text(
         "🔑 Управление API ключами\n\n"
         "Здесь вы можете добавлять несколько API ключей "
@@ -866,10 +979,17 @@ async def manage_api_keys(callback: CallbackQuery):
 async def back_to_settings(callback: CallbackQuery):
     """Возврат в настройки"""
     user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     use_default_keys = await db.get_use_default_keys(user_id)
 
     await callback.message.edit_text(
-        "⚙️ Настройки",
+        "⚙️ Настройки бота\n\n"
+        "Выберите раздел для настройки:",
         reply_markup=get_settings_menu(use_default_keys)
     )
     await callback.answer()
@@ -879,6 +999,12 @@ async def back_to_settings(callback: CallbackQuery):
 async def list_api_keys(callback: CallbackQuery):
     """Список всех API ключей пользователя"""
     user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     keys = await db.get_all_api_keys(user_id)
 
     if not keys:
@@ -902,6 +1028,13 @@ async def list_api_keys(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("view_key:"))
 async def view_key(callback: CallbackQuery):
     """Просмотр конкретного ключа"""
+    user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     key_id = int(callback.data.split(":")[1])
     key_data = await db.get_api_key_by_id(key_id)
 
@@ -928,6 +1061,13 @@ async def view_key(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("toggle_key:"))
 async def toggle_key(callback: CallbackQuery):
     """Включение/выключение ключа"""
+    user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     key_id = int(callback.data.split(":")[1])
 
     await db.toggle_api_key(key_id)
@@ -954,6 +1094,13 @@ async def toggle_key(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("delete_key:"))
 async def delete_key_confirm(callback: CallbackQuery):
     """Подтверждение удаления ключа"""
+    user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     key_id = int(callback.data.split(":")[1])
     key_data = await db.get_api_key_by_id(key_id)
 
@@ -973,6 +1120,13 @@ async def delete_key_confirm(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("confirm_delete_key:"))
 async def delete_key_confirmed(callback: CallbackQuery):
     """Удаление ключа после подтверждения"""
+    user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     key_id = int(callback.data.split(":")[1])
     key_data = await db.get_api_key_by_id(key_id)
 
@@ -1005,6 +1159,13 @@ async def delete_key_confirmed(callback: CallbackQuery):
 @router.callback_query(F.data == "add_new_api_key")
 async def add_new_api_key_start(callback: CallbackQuery, state: FSMContext):
     """Начало добавления нового ключа"""
+    user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     await callback.message.answer(
         "➕ Добавление нового API ключа\n\n"
         "Шаг 1/2: Введите название для ключа\n\n"
@@ -1068,6 +1229,13 @@ async def add_api_key_value(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("edit_key_name:"))
 async def edit_key_name_start(callback: CallbackQuery, state: FSMContext):
     """Начало редактирования названия ключа"""
+    user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     key_id = int(callback.data.split(":")[1])
     key_data = await db.get_api_key_by_id(key_id)
 
@@ -1111,6 +1279,13 @@ async def edit_key_name_process(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("edit_key_value:"))
 async def edit_key_value_start(callback: CallbackQuery, state: FSMContext):
     """Начало редактирования значения ключа"""
+    user_id = callback.from_user.id
+
+    # Проверка активной подписки
+    if not await db.has_active_subscription(user_id):
+        await callback.answer("⚠️ Необходима активная подписка", show_alert=True)
+        return
+
     key_id = int(callback.data.split(":")[1])
     key_data = await db.get_api_key_by_id(key_id)
 
@@ -1150,6 +1325,346 @@ async def edit_key_value_process(message: Message, state: FSMContext):
         reply_markup=get_main_menu(True)
     )
     await state.clear()
+
+
+# ============ Обработчики подписки ============
+
+@router.message(F.text == "💳 Подписка")
+async def subscription_status(message: Message):
+    """Показ статуса подписки"""
+    user_id = message.from_user.id
+    subscription = await db.get_active_subscription(user_id)
+
+    # Проверяем наличие привязанных карт
+    payment_methods = await db.get_user_payment_methods(user_id)
+    has_cards = len(payment_methods) > 0
+
+    if subscription:
+        from datetime import datetime
+        end_date = datetime.fromisoformat(subscription['end_date'])
+        days_left = (end_date - datetime.now()).days
+
+        plan = SUBSCRIPTION_PLANS.get(subscription['plan_id'], {})
+        plan_name = plan.get('name', 'Неизвестный план')
+
+        await message.answer(
+            f"💳 Ваша подписка\n\n"
+            f"Тариф: {plan_name}\n"
+            f"Действует до: {end_date.strftime('%d.%m.%Y')}\n"
+            f"Осталось дней: {days_left}\n\n"
+            f"После окончания подписки доступ к функциям бота будет ограничен.",
+            reply_markup=get_subscription_with_cards_keyboard(True, has_cards)
+        )
+    else:
+        await message.answer(
+            "💳 Подписка\n\n"
+            "У вас нет активной подписки.\n\n"
+            "Оформите подписку для получения полного доступа ко всем функциям бота:\n"
+            "• Неограниченный поиск товаров\n"
+            "• Работа со всеми API ключами\n"
+            "• Приоритетная поддержка",
+            reply_markup=get_subscription_with_cards_keyboard(False, has_cards)
+        )
+
+
+@router.callback_query(F.data == "show_subscription_plans")
+async def show_subscription_plans(callback: CallbackQuery):
+    """Показ доступных тарифов"""
+    await callback.message.edit_text(
+        "💳 Оформление подписки\n\n"
+        "Подписка включает:\n"
+        "✅ Неограниченный поиск товаров\n"
+        "✅ Работа со всеми API ключами\n"
+        "✅ Загрузка Excel файлов\n"
+        "✅ Настройка порогов скидок\n\n"
+        "Выберите тариф:",
+        reply_markup=get_subscription_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "renew_subscription")
+async def renew_subscription(callback: CallbackQuery):
+    """Продление подписки"""
+    await callback.message.edit_text(
+        "📝 Продление подписки\n\n"
+        "Продлите подписку для сохранения доступа ко всем функциям:\n"
+        "✅ Неограниченный поиск товаров\n"
+        "✅ Работа со всеми API ключами\n"
+        "✅ Загрузка Excel файлов\n"
+        "✅ Настройка порогов скидок",
+        reply_markup=get_subscription_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("subscribe:"))
+async def process_subscription(callback: CallbackQuery):
+    """Обработка выбора тарифа и создание платежа ЮKassa"""
+    user_id = callback.from_user.id
+    plan_id = callback.data.split(":")[1]
+
+    plan = SUBSCRIPTION_PLANS.get(plan_id)
+    if not plan:
+        await callback.answer("❌ Неверный тариф", show_alert=True)
+        return
+
+    # Создаем платеж через ЮKassa
+    payment_data = YuKassaPayment.create_payment(
+        amount=plan['price'],
+        description=plan['description'],
+        user_id=user_id,
+        return_url=f"https://t.me/{(await bot.me()).username}",
+        save_payment_method=True  # Сохраняем платежный метод для автоплатежей
+    )
+
+    if payment_data:
+        # Сохраняем информацию о платеже в БД
+        await db.create_payment(
+            user_id=user_id,
+            payment_id=payment_data['id'],
+            plan_id=plan_id,
+            amount=plan['price'],
+            description=plan['description'],
+            confirmation_url=payment_data['confirmation_url'],
+            test=payment_data['test']
+        )
+
+        payment_url = payment_data['confirmation_url']
+
+        # Создаем inline кнопки
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        check_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить", url=payment_url)],
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment:{payment_data['id']}")],
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_menu")]
+        ])
+
+        test_mode_text = "\n\n⚠️ <b>ТЕСТОВЫЙ РЕЖИМ</b>\nИспользуйте тестовую карту: 5555 5555 5555 4477" if payment_data['test'] else ""
+
+        await callback.message.edit_text(
+            f"💳 Оформление подписки\n\n"
+            f"Тариф: {plan['name']}\n"
+            f"Стоимость: {plan['price']} ₽\n"
+            f"Срок: {plan['duration_days']} дней\n\n"
+            f"1️⃣ Нажмите кнопку 'Оплатить' для перехода к оплате\n"
+            f"2️⃣ После оплаты вернитесь в бот и нажмите 'Проверить оплату'"
+            f"{test_mode_text}",
+            reply_markup=check_keyboard,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+    else:
+        logger.error(f"Ошибка создания платежа для пользователя {user_id}")
+
+        await callback.message.edit_text(
+            f"❌ Ошибка при создании платежа\n\n"
+            f"Попробуйте позже или обратитесь в поддержку."
+        )
+        await callback.answer("Ошибка создания платежа", show_alert=True)
+
+
+# ============ Обработчик проверки оплаты ============
+
+@router.callback_query(F.data.startswith("check_payment:"))
+async def check_payment_status(callback: CallbackQuery):
+    """Проверка статуса платежа по запросу пользователя"""
+    payment_id = callback.data.split(":")[1]
+    user_id = callback.from_user.id
+
+    await callback.answer("⏳ Проверяю статус оплаты...")
+
+    # Получаем информацию о платеже через API ЮKassa
+    payment_info = YuKassaPayment.get_payment(payment_id)
+
+    if not payment_info:
+        await callback.message.edit_text(
+            "❌ Ошибка проверки платежа\n\n"
+            "Не удалось получить информацию о платеже.\n"
+            "Попробуйте позже или обратитесь в поддержку."
+        )
+        return
+
+    status = payment_info['status']
+    paid = payment_info['paid']
+
+    # Обновляем статус платежа в БД
+    await db.update_payment_status(payment_id, status, paid)
+
+    if status == 'succeeded' and paid:
+        # Платеж успешен - сохраняем платежный метод и активируем подписку
+
+        # Сохраняем платежный метод, если он был использован
+        if 'payment_method' in payment_info and payment_info['payment_method'].get('saved'):
+            payment_method = payment_info['payment_method']
+            card_data = payment_method.get('card') if payment_method['type'] == 'bank_card' else None
+
+            await db.save_payment_method(
+                user_id=user_id,
+                payment_method_id=payment_method['id'],
+                payment_method_type=payment_method['type'],
+                card_data=card_data
+            )
+            logger.info(f"Сохранен платежный метод {payment_method['id']} для пользователя {user_id}")
+
+        # Активируем подписку
+        success = await db.activate_subscription_yukassa(payment_id)
+
+        if success:
+            subscription = await db.get_active_subscription(user_id)
+            from datetime import datetime
+            end_date = datetime.fromisoformat(subscription['end_date'])
+
+            # Удаляем inline сообщение
+            await callback.message.delete()
+
+            # Отправляем новое сообщение с результатом
+            await callback.message.answer(
+                f"✅ <b>Оплата прошла успешно!</b>\n\n"
+                f"Подписка активирована до: {end_date.strftime('%d.%m.%Y')}\n\n"
+                f"Спасибо за покупку! Теперь вам доступны все функции бота. 🎉",
+                reply_markup=get_main_menu(True),
+                parse_mode="HTML"
+            )
+        else:
+            await callback.message.edit_text(
+                "❌ Ошибка активации подписки\n\n"
+                "Платеж прошел, но возникла ошибка активации. "
+                "Обратитесь в поддержку."
+            )
+
+    elif status == 'pending' or status == 'waiting_for_capture':
+        # Платеж еще обрабатывается
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        check_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment:{payment_id}")],
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_menu")]
+        ])
+
+        await callback.message.edit_text(
+            f"⏳ Платеж в обработке\n\n"
+            f"Ваш платеж еще обрабатывается платежной системой.\n"
+            f"Обычно это занимает несколько минут.\n\n"
+            f"Попробуйте проверить статус через минуту.",
+            reply_markup=check_keyboard
+        )
+
+    elif status == 'canceled':
+        # Платеж отменен
+        payment_methods = await db.get_user_payment_methods(user_id)
+        has_cards = len(payment_methods) > 0
+
+        await callback.message.edit_text(
+            f"❌ Платеж отменен\n\n"
+            f"Платеж был отменен.\n"
+            f"Если это произошло по ошибке, попробуйте оформить подписку снова.",
+            reply_markup=get_subscription_with_cards_keyboard(False, has_cards)
+        )
+
+    else:
+        # Неизвестный статус
+        await callback.message.edit_text(
+            f"❓ Неизвестный статус: {status}\n\n"
+            f"Обратитесь в поддержку для уточнения."
+        )
+
+
+# ============ Обработчики управления картами ============
+
+@router.callback_query(F.data == "subscription_info")
+async def subscription_info_callback(callback: CallbackQuery):
+    """Возврат к информации о подписке"""
+    await subscription_status(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "manage_cards")
+async def manage_cards(callback: CallbackQuery):
+    """Показ списка привязанных карт"""
+    user_id = callback.from_user.id
+    payment_methods = await db.get_user_payment_methods(user_id)
+
+    if not payment_methods:
+        await callback.message.edit_text(
+            "💳 Управление картами\n\n"
+            "У вас нет привязанных карт.\n\n"
+            "Карты автоматически сохраняются при первой оплате подписки.",
+            reply_markup=get_subscription_with_cards_keyboard(
+                await db.has_active_subscription(user_id),
+                False
+            )
+        )
+        await callback.answer()
+        return
+
+    cards_text = "💳 Ваши привязанные карты:\n\n"
+    for method in payment_methods:
+        if method['type'] == 'bank_card':
+            card_info = f"•••• {method['card_last4']}"
+            if method['card_type']:
+                card_info += f" ({method['card_type']})"
+            cards_text += f"• {card_info}\n"
+
+    cards_text += "\nВыберите карту для управления:"
+
+    await callback.message.edit_text(
+        cards_text,
+        reply_markup=get_payment_methods_keyboard(payment_methods)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("view_card:"))
+async def view_card(callback: CallbackQuery):
+    """Просмотр информации о карте"""
+    payment_method_id = callback.data.split(":")[1]
+    method = await db.get_payment_method_by_id(payment_method_id)
+
+    if not method:
+        await callback.answer("❌ Карта не найдена", show_alert=True)
+        return
+
+    card_text = "💳 Информация о карте\n\n"
+
+    if method['type'] == 'bank_card':
+        card_text += f"Номер: •••• {method['card_last4']}\n"
+        if method['card_type']:
+            card_text += f"Тип: {method['card_type']}\n"
+        if method['card_expiry_month'] and method['card_expiry_year']:
+            card_text += f"Срок: {method['card_expiry_month']}/{method['card_expiry_year']}\n"
+
+    await callback.message.edit_text(
+        card_text,
+        reply_markup=get_card_actions_keyboard(payment_method_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("unbind_card:"))
+async def unbind_card(callback: CallbackQuery):
+    """Запрос подтверждения отвязки карты"""
+    payment_method_id = callback.data.split(":")[1]
+
+    await callback.message.edit_text(
+        "⚠️ Подтвердите отвязку карты\n\n"
+        "Вы уверены, что хотите отвязать эту карту?\n"
+        "Для следующих платежей потребуется повторно вводить данные карты.",
+        reply_markup=get_confirm_unbind_card_keyboard(payment_method_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("confirm_unbind_card:"))
+async def confirm_unbind_card(callback: CallbackQuery):
+    """Подтверждение отвязки карты"""
+    payment_method_id = callback.data.split(":")[1]
+
+    await db.delete_payment_method(payment_method_id)
+
+    await callback.answer("✅ Карта успешно отвязана", show_alert=True)
+
+    # Возвращаемся к списку карт
+    await manage_cards(callback)
 
 
 async def main():
