@@ -460,7 +460,17 @@ class Database:
 
     async def get_active_subscription(self, user_id: int):
         """Получение активной подписки пользователя"""
-        from datetime import datetime
+        from datetime import datetime, timedelta
+        from config import ADMIN_IDS
+
+        # Администраторы имеют бессрочную подписку
+        if user_id in ADMIN_IDS:
+            return {
+                'id': 0,
+                'plan_id': 'admin',
+                'start_date': datetime.now().isoformat(),
+                'end_date': (datetime.now() + timedelta(days=36500)).isoformat()  # 100 лет
+            }
 
         async with aiosqlite.connect(self.db_name) as db:
             async with db.execute(

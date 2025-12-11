@@ -29,6 +29,11 @@ YUKASSA_SHOP_ID = os.getenv('YUKASSA_SHOP_ID')
 YUKASSA_SECRET_KEY = os.getenv('YUKASSA_SECRET_KEY')
 YUKASSA_TEST_MODE = os.getenv('YUKASSA_TEST_MODE', 'True') == 'True'
 
+# Администраторы (бессрочная подписка)
+ADMIN_IDS = [
+    701912845,  # Основной администратор
+]
+
 # Тарифные планы подписки
 SUBSCRIPTION_PLANS = {
     '1_month': {
@@ -36,5 +41,11 @@ SUBSCRIPTION_PLANS = {
         'duration_days': 30,
         'price': '499.00',
         'description': 'Подписка на 1 месяц'
+    },
+    'admin': {
+        'name': 'Администратор',
+        'duration_days': 36500,  # 100 лет
+        'price': '0.00',
+        'description': 'Бессрочная подписка'
     }
 }

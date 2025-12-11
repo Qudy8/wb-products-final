@@ -30,6 +30,12 @@ class AutoRenewal:
                 plan_id = subscription['plan_id']
                 end_date = datetime.fromisoformat(subscription['end_date'])
 
+                # Пропускаем администраторов (у них бессрочная подписка)
+                from config import ADMIN_IDS
+                if user_id in ADMIN_IDS:
+                    logger.info(f"Пользователь {user_id} является администратором, пропускаем автопродление")
+                    continue
+
                 # Проверяем, что подписка истекает через 1 день или меньше
                 days_left = (end_date - datetime.now()).days
                 if days_left > 1:
