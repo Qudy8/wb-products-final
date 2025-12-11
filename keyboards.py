@@ -228,3 +228,33 @@ def get_subscription_with_cards_keyboard(has_subscription: bool, has_cards: bool
 
     keyboard.append([InlineKeyboardButton(text="◀️ Закрыть", callback_data="back_to_menu")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_payment_method_selection_keyboard(payment_methods: list, plan_id: str) -> InlineKeyboardMarkup:
+    """Клавиатура выбора способа оплаты (сохраненная карта или новая)"""
+    keyboard = []
+
+    # Добавляем сохраненные карты
+    for method in payment_methods:
+        if method['type'] == 'bank_card' and method['card_last4']:
+            card_info = f"💳 •••• {method['card_last4']}"
+            if method['card_type']:
+                card_info += f" ({method['card_type']})"
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=card_info,
+                    callback_data=f"pay_with_card:{plan_id}:{method['payment_method_id']}"
+                )
+            ])
+
+    # Кнопка для оплаты новой картой
+    keyboard.append([
+        InlineKeyboardButton(
+            text="💳 Оплатить новой картой",
+            callback_data=f"pay_with_new_card:{plan_id}"
+        )
+    ])
+
+    keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_subscription")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
