@@ -110,6 +110,9 @@ class Database:
                 if 'use_default_keys' not in column_names:
                     await db.execute('ALTER TABLE users ADD COLUMN use_default_keys BOOLEAN DEFAULT 1')
 
+                if 'email' not in column_names:
+                    await db.execute('ALTER TABLE users ADD COLUMN email TEXT')
+
             except Exception as e:
                 # Если таблица не существует, она будет создана выше
                 pass
@@ -417,12 +420,13 @@ class Database:
                 if not plan:
                     return False
 
-                # Проверяем, есть ли активная подписка
+                # Проверяем, есть ли активная подписка (исключая текущую)
                 async with db.execute(
                     '''SELECT end_date FROM subscriptions
                        WHERE user_id = ? AND status = 'active' AND end_date > ?
+                       AND yandex_order_id != ?
                        ORDER BY end_date DESC LIMIT 1''',
-                    (user_id, datetime.now())
+                    (user_id, datetime.now(), yandex_order_id)
                 ) as active_cursor:
                     active_row = await active_cursor.fetchone()
 
@@ -431,6 +435,14 @@ class Database:
                         current_end_date = datetime.fromisoformat(active_row[0])
                         start_date = current_end_date
                         end_date = start_date + timedelta(days=plan['duration_days'])
+
+                        # ВАЖНО: Деактивируем старую подписку, чтобы избежать повторных списаний
+                        await db.execute(
+                            '''UPDATE subscriptions
+                               SET status = 'renewed', updated_at = ?
+                               WHERE user_id = ? AND status = 'active' AND yandex_order_id != ?''',
+                            (datetime.now(), user_id, yandex_order_id)
+                        )
                     else:
                         # Нет активной подписки - начинаем с текущего момента
                         start_date = datetime.now()
@@ -611,6 +623,23 @@ class Database:
                     'created_at': row[5]
                 } for row in rows]
 
+    async def has_recent_auto_renewal_payment(self, user_id: int, hours: int = 24) -> bool:
+        """Проверка, был ли недавно создан платеж автопродления для пользователя"""
+        from datetime import datetime, timedelta
+
+        cutoff_time = datetime.now() - timedelta(hours=hours)
+
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                '''SELECT COUNT(*) FROM payments
+                   WHERE user_id = ?
+                     AND description LIKE 'Автопродление:%'
+                     AND created_at > ?''',
+                (user_id, cutoff_time)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] > 0 if row else False
+
     # Методы для работы с платежными методами (привязанными картами)
     async def save_payment_method(self, user_id: int, payment_method_id: str, payment_method_type: str,
                                   card_data: dict = None):
@@ -695,6 +724,11 @@ class Database:
                     }
                 return None
 
+    async def has_payment_methods(self, user_id: int) -> bool:
+        """Проверка наличия активных платежных методов у пользователя"""
+        payment_methods = await self.get_user_payment_methods(user_id)
+        return len(payment_methods) > 0
+
     async def activate_subscription_yukassa(self, payment_id: str):
         """Активация подписки после успешной оплаты через ЮKassa"""
         from datetime import datetime, timedelta
@@ -726,6 +760,14 @@ class Database:
                     current_end_date = datetime.fromisoformat(active_row[0])
                     start_date = current_end_date
                     end_date = start_date + timedelta(days=plan['duration_days'])
+
+                    # ВАЖНО: Деактивируем старую подписку, чтобы избежать повторных списаний
+                    await db.execute(
+                        '''UPDATE subscriptions
+                           SET status = 'renewed', updated_at = ?
+                           WHERE user_id = ? AND status = 'active' AND end_date > ?''',
+                        (datetime.now(), user_id, datetime.now())
+                    )
                 else:
                     # Нет активной подписки - начинаем с текущего момента
                     start_date = datetime.now()
@@ -740,3 +782,59 @@ class Database:
             )
             await db.commit()
             return True
+
+    async def set_user_email(self, user_id: int, email: str):
+        """Сохранение email пользователя"""
+        async with aiosqlite.connect(self.db_name) as db:
+            await db.execute(
+                'UPDATE users SET email = ? WHERE user_id = ?',
+                (email, user_id)
+            )
+            await db.commit()
+
+    async def get_user_email(self, user_id: int) -> str | None:
+        """Получение email пользователя"""
+        async with aiosqlite.connect(self.db_name) as db:
+            async with db.execute(
+                'SELECT email FROM users WHERE user_id = ?',
+                (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row and row[0] else None
+
+    async def has_email(self, user_id: int) -> bool:
+        """Проверка наличия email у пользователя"""
+        email = await self.get_user_email(user_id)
+        return email is not None and len(email) > 0
+
+    async def get_expiring_subscriptions(self, days_before: int = 3):
+        """Получение подписок, истекающих в ближайшие N дней (только одна на пользователя - самая новая)"""
+        from datetime import datetime, timedelta
+
+        # Диапазон дат: от текущего момента до days_before дней вперед
+        now = datetime.now()
+        future_date = now + timedelta(days=days_before)
+
+        async with aiosqlite.connect(self.db_name) as db:
+            # Используем GROUP BY, чтобы получить только одну (самую новую) подписку для каждого пользователя
+            async with db.execute(
+                '''SELECT user_id, plan_id, end_date
+                   FROM subscriptions
+                   WHERE status = 'active'
+                     AND end_date > ?
+                     AND end_date <= ?
+                     AND id IN (
+                         SELECT MAX(id)
+                         FROM subscriptions
+                         WHERE status = 'active'
+                         GROUP BY user_id
+                     )
+                   ORDER BY end_date ASC''',
+                (now, future_date)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [{
+                    'user_id': row[0],
+                    'plan_id': row[1],
+                    'end_date': row[2]
+                } for row in rows]
