@@ -34,7 +34,7 @@ SUBSCRIPTION_PLANS = {
     '1_month': {
         'name': '1 месяц',
         'duration_days': 30,
-        'price': '599.00',
+        'price': '499.00',
         'description': 'Подписка на 1 месяц'
     }
 }
