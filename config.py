@@ -41,11 +41,5 @@ SUBSCRIPTION_PLANS = {
         'duration_days': 30,
         'price': '499.00',
         'description': 'Подписка на 1 месяц'
-    },
-    'admin': {
-        'name': 'Администратор',
-        'duration_days': 36500,  # 100 лет
-        'price': '0.00',
-        'description': 'Бессрочная подписка'
     }
 }

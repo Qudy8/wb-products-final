@@ -28,6 +28,7 @@ class YuKassaPayment:
         description: str,
         user_id: int,
         return_url: str,
+        email: Optional[str] = None,
         save_payment_method: bool = True,
         payment_method_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
@@ -63,21 +64,53 @@ class YuKassaPayment:
                 "description": description,
                 "metadata": {
                     "user_id": str(user_id)
+                },
+                "receipt": {
+                    "customer": {
+                        "email": email if email else f"user{user_id}@telegram.user"
+                    },
+                    "items": [
+                        {
+                            "description": description,
+                            "quantity": "1.00",
+                            "amount": {
+                                "value": amount,
+                                "currency": "RUB"
+                            },
+                            "vat_code": 1,  # НДС 20%
+                            "payment_mode": "full_prepayment",
+                            "payment_subject": "service"
+                        }
+                    ]
                 }
             }
 
-            # Если нужно сохранить платежный метод
-            if save_payment_method and not payment_method_id:
-                payment_data["save_payment_method"] = True
-
             # Если используется сохраненный платежный метод
             if payment_method_id:
+                # При использовании сохраненной карты указываем payment_method_id
                 payment_data["payment_method_id"] = payment_method_id
+            else:
+                # При новой оплате указываем тип платежного метода
+                payment_data["payment_method_data"] = {
+                    "type": "bank_card"  # Ограничение: только оплата картой (для автопродления)
+                }
+
+                # Если нужно сохранить платежный метод
+                if save_payment_method:
+                    payment_data["save_payment_method"] = True
 
             # Создаем платеж
             payment = Payment.create(payment_data, idempotence_key)
 
             logger.info(f"Создан платеж {payment.id} для пользователя {user_id}")
+
+            # Обработка created_at (может быть datetime или str)
+            created_at_str = None
+            if payment.created_at:
+                if hasattr(payment.created_at, 'isoformat'):
+                    created_at_str = payment.created_at.isoformat()
+                else:
+                    created_at_str = str(payment.created_at)
 
             return {
                 "id": payment.id,
@@ -86,13 +119,14 @@ class YuKassaPayment:
                 "currency": payment.amount.currency,
                 "description": payment.description,
                 "confirmation_url": payment.confirmation.confirmation_url if payment.confirmation else None,
-                "created_at": payment.created_at.isoformat() if payment.created_at else None,
+                "created_at": created_at_str,
                 "paid": payment.paid,
                 "test": payment.test
             }
 
         except Exception as e:
-            logger.error(f"Ошибка создания платежа: {e}")
+            logger.error(f"Ошибка создания платежа: {e}", exc_info=True)
+            logger.error(f"Параметры платежа: amount={amount}, description={description}, user_id={user_id}, email={email}")
             return None
 
     @staticmethod
@@ -109,6 +143,14 @@ class YuKassaPayment:
         try:
             payment = Payment.find_one(payment_id)
 
+            # Обработка created_at (может быть datetime или str)
+            created_at_str = None
+            if payment.created_at:
+                if hasattr(payment.created_at, 'isoformat'):
+                    created_at_str = payment.created_at.isoformat()
+                else:
+                    created_at_str = str(payment.created_at)
+
             result = {
                 "id": payment.id,
                 "status": payment.status,
@@ -117,7 +159,7 @@ class YuKassaPayment:
                 "description": payment.description,
                 "paid": payment.paid,
                 "test": payment.test,
-                "created_at": payment.created_at.isoformat() if payment.created_at else None,
+                "created_at": created_at_str,
                 "metadata": payment.metadata if payment.metadata else {}
             }
 

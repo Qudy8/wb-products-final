@@ -463,11 +463,11 @@ class Database:
         from datetime import datetime, timedelta
         from config import ADMIN_IDS
 
-        # Администраторы имеют бессрочную подписку
+        # Администраторы имеют бессрочную подписку (выглядит как обычная, но на 100 лет)
         if user_id in ADMIN_IDS:
             return {
                 'id': 0,
-                'plan_id': 'admin',
+                'plan_id': '1_month',  # Используем обычный план, чтобы не ломать логику
                 'start_date': datetime.now().isoformat(),
                 'end_date': (datetime.now() + timedelta(days=36500)).isoformat()  # 100 лет
             }

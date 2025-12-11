@@ -27,10 +27,12 @@ from keyboards import (
     get_payment_methods_keyboard,
     get_card_actions_keyboard,
     get_confirm_unbind_card_keyboard,
-    get_subscription_with_cards_keyboard
+    get_subscription_with_cards_keyboard,
+    get_payment_method_selection_keyboard
 )
 from yukassa_payment import YuKassaPayment
 from config import SUBSCRIPTION_PLANS
+from auto_renewal import AutoRenewal
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -72,6 +74,10 @@ class EditApiKeyValue(StatesGroup):
 
 class SetThreshold(StatesGroup):
     waiting_for_threshold = State()
+
+
+class SetEmail(StatesGroup):
+    waiting_for_email = State()
 
 
 # Обработчик команды /start
@@ -134,6 +140,50 @@ async def cmd_start(message: Message):
             "Нажмите '💳 Подписка' для выбора тарифного плана.",
             reply_markup=get_main_menu(False)  # Нет активной подписки
         )
+
+
+# Команда для добавления тестовой карты (для демонстрации UX)
+@router.message(Command("add_test_card"))
+async def add_test_card(message: Message):
+    """Добавление тестовой карты для демонстрации UX отвязки"""
+    user_id = message.from_user.id
+
+    # Добавляем пользователя если его нет
+    await db.add_user(user_id, message.from_user.username)
+
+    # Создаем тестовую карту
+    test_card_data = {
+        'last4': '4477',
+        'first6': '555555',
+        'card_type': 'visa',
+        'expiry_month': '12',
+        'expiry_year': '2027'
+    }
+
+    # Генерируем уникальный ID для тестовой карты
+    import uuid
+    test_payment_method_id = f"test_{uuid.uuid4()}"
+
+    # Сохраняем тестовую карту в БД
+    await db.save_payment_method(
+        user_id=user_id,
+        payment_method_id=test_payment_method_id,
+        payment_method_type='bank_card',
+        card_data=test_card_data
+    )
+
+    await message.answer(
+        "✅ <b>Тестовая карта добавлена!</b>\n\n"
+        "💳 Карта: •••• 4477 (Visa)\n\n"
+        "Теперь вы можете:\n"
+        "1. Перейти в '💳 Подписка' → '💳 Мои карты'\n"
+        "2. Выбрать карту\n"
+        "3. Нажать '🗑 Отвязать карту'\n"
+        "4. Сделать скриншоты для ЮKassa\n\n"
+        "Эта карта создана только для демонстрации интерфейса отвязки.",
+        parse_mode="HTML",
+        reply_markup=get_main_menu(await db.has_active_subscription(user_id))
+    )
 
 
 # Обработчик кнопки "Настройки"
@@ -984,6 +1034,150 @@ async def set_threshold_process(message: Message, state: FSMContext):
         )
 
 
+# ============ Обработчики для ввода email ============
+
+@router.message(SetEmail.waiting_for_email)
+async def set_email_process(message: Message, state: FSMContext):
+    """Обработка введенного email"""
+    import re
+
+    email = message.text.strip()
+
+    # Простая валидация email
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+    if not re.match(email_pattern, email):
+        await message.answer(
+            "❌ Неверный формат email\n\n"
+            "Пожалуйста, введите корректный email адрес\n"
+            "Например: <code>example@mail.com</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    # Сохраняем email
+    user_id = message.from_user.id
+    await db.set_user_email(user_id, email)
+
+    # Получаем plan_id из состояния
+    data = await state.get_data()
+    plan_id = data.get('plan_id')
+
+    if not plan_id:
+        await state.clear()
+        await message.answer(
+            "❌ Ошибка: не указан тариф\n\nПопробуйте снова",
+            reply_markup=get_main_menu(await db.has_active_subscription(user_id))
+        )
+        return
+
+    plan = SUBSCRIPTION_PLANS.get(plan_id)
+    if not plan:
+        await state.clear()
+        await message.answer(
+            "❌ Ошибка: неверный тариф",
+            reply_markup=get_main_menu(await db.has_active_subscription(user_id))
+        )
+        return
+
+    # Создаем платеж
+    try:
+        payment_data = YuKassaPayment.create_payment(
+            amount=plan['price'],
+            description=plan['description'],
+            user_id=user_id,
+            email=email,
+            return_url=f"https://t.me/{(await bot.me()).username}",
+            save_payment_method=True  # Сохранение карты для автопродления (требует recurring payments в ЮKassa)
+        )
+    except Exception as e:
+        logger.error(f"Исключение при создании платежа для пользователя {user_id}: {e}", exc_info=True)
+        payment_data = None
+
+    if payment_data:
+        # Сохраняем информацию о платеже в БД
+        await db.create_payment(
+            user_id=user_id,
+            payment_id=payment_data['id'],
+            plan_id=plan_id,
+            amount=plan['price'],
+            description=plan['description'],
+            confirmation_url=payment_data['confirmation_url'],
+            test=payment_data['test']
+        )
+
+        payment_url = payment_data['confirmation_url']
+
+        # Создаем inline кнопки
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        check_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить", url=payment_url)],
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment:{payment_data['id']}")],
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_menu")]
+        ])
+
+        test_mode_text = "\n\n⚠️ <b>ТЕСТОВЫЙ РЕЖИМ</b>\nИспользуйте тестовую карту: 5555 5555 5555 4477" if payment_data['test'] else ""
+
+        await message.answer(
+            f"✅ Email сохранен: {email}\n\n"
+            f"💳 Оформление подписки\n\n"
+            f"Тариф: {plan['name']}\n"
+            f"Стоимость: {plan['price']} ₽\n"
+            f"Срок: {plan['duration_days']} дней\n\n"
+            f"1️⃣ Нажмите кнопку 'Оплатить' для перехода к оплате\n"
+            f"2️⃣ После оплаты вернитесь в бот и нажмите 'Проверить оплату'\n\n"
+            f"ℹ️ <b>Важная информация:</b>\n"
+            f"• Для автопродления доступна только <b>оплата картой</b>\n"
+            f"• Ваша карта будет сохранена для автоматического продления\n"
+            f"• Отвязать карту можно в любой момент:\n"
+            f"  💳 Подписка → 💳 Мои карты → 🗑 Отвязать карту"
+            f"{test_mode_text}",
+            reply_markup=check_keyboard,
+            parse_mode="HTML"
+        )
+    else:
+        logger.error(f"Ошибка создания платежа для пользователя {user_id}")
+        await message.answer(
+            f"❌ Ошибка при создании платежа\n\n"
+            f"Попробуйте позже или обратитесь в поддержку.",
+            reply_markup=get_main_menu(await db.has_active_subscription(user_id))
+        )
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "back_to_subscription")
+async def back_to_subscription(callback: CallbackQuery, state: FSMContext):
+    """Возврат к меню подписки"""
+    await state.clear()
+
+    user_id = callback.from_user.id
+    subscription = await db.get_active_subscription(user_id)
+    has_cards = await db.has_payment_methods(user_id)
+
+    if subscription:
+        from datetime import datetime
+        end_date = datetime.fromisoformat(subscription['end_date'])
+        plan = SUBSCRIPTION_PLANS.get(subscription['plan_id'], {})
+
+        await callback.message.edit_text(
+            f"💳 Ваша подписка\n\n"
+            f"Тариф: {plan.get('name', 'Неизвестно')}\n"
+            f"Активна до: {end_date.strftime('%d.%m.%Y')}\n\n"
+            f"Выберите действие:",
+            reply_markup=get_subscription_with_cards_keyboard(True, has_cards)
+        )
+    else:
+        await callback.message.edit_text(
+            "💳 Подписка\n\n"
+            "У вас пока нет активной подписки.\n"
+            "Выберите тариф для оформления:",
+            reply_markup=get_subscription_with_cards_keyboard(False, has_cards)
+        )
+
+    await callback.answer()
+
+
 # ============ Обработчики управления API ключами ============
 
 @router.callback_query(F.data == "manage_api_keys")
@@ -1429,7 +1623,7 @@ async def renew_subscription(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("subscribe:"))
-async def process_subscription(callback: CallbackQuery):
+async def process_subscription(callback: CallbackQuery, state: FSMContext):
     """Обработка выбора тарифа и создание платежа ЮKassa"""
     user_id = callback.from_user.id
     plan_id = callback.data.split(":")[1]
@@ -1439,13 +1633,53 @@ async def process_subscription(callback: CallbackQuery):
         await callback.answer("❌ Неверный тариф", show_alert=True)
         return
 
-    # Создаем платеж через ЮKassa
+    # Проверяем наличие сохраненных карт
+    payment_methods = await db.get_user_payment_methods(user_id)
+
+    if payment_methods:
+        # У пользователя есть сохраненные карты - предлагаем выбрать способ оплаты
+        await callback.message.edit_text(
+            f"💳 Оформление подписки\n\n"
+            f"Тариф: {plan['name']}\n"
+            f"Стоимость: {plan['price']} ₽\n"
+            f"Срок: {plan['duration_days']} дней\n\n"
+            f"Выберите способ оплаты:",
+            reply_markup=get_payment_method_selection_keyboard(payment_methods, plan_id)
+        )
+        await callback.answer()
+        return
+
+    # Нет сохраненных карт - проверяем email
+    email = await db.get_user_email(user_id)
+
+    if not email:
+        # Email не указан - запрашиваем его
+        await state.update_data(plan_id=plan_id)
+        await state.set_state(SetEmail.waiting_for_email)
+
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        cancel_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_subscription")]
+        ])
+
+        await callback.message.edit_text(
+            "📧 <b>Укажите ваш email</b>\n\n"
+            "На этот адрес будет отправлен электронный чек.\n\n"
+            "Введите email в формате: <code>example@mail.com</code>",
+            reply_markup=cancel_keyboard,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+    # Email есть - создаем платеж с новой картой
     payment_data = YuKassaPayment.create_payment(
         amount=plan['price'],
         description=plan['description'],
         user_id=user_id,
+        email=email,
         return_url=f"https://t.me/{(await bot.me()).username}",
-        save_payment_method=True  # Сохраняем платежный метод для автоплатежей
+        save_payment_method=True  # Сохранение карты для автопродления (требует recurring payments в ЮKassa)
     )
 
     if payment_data:
@@ -1478,7 +1712,12 @@ async def process_subscription(callback: CallbackQuery):
             f"Стоимость: {plan['price']} ₽\n"
             f"Срок: {plan['duration_days']} дней\n\n"
             f"1️⃣ Нажмите кнопку 'Оплатить' для перехода к оплате\n"
-            f"2️⃣ После оплаты вернитесь в бот и нажмите 'Проверить оплату'"
+            f"2️⃣ После оплаты вернитесь в бот и нажмите 'Проверить оплату'\n\n"
+            f"ℹ️ <b>Важная информация:</b>\n"
+            f"• Для автопродления доступна только <b>оплата картой</b>\n"
+            f"• Ваша карта будет сохранена для автоматического продления\n"
+            f"• Отвязать карту можно в любой момент:\n"
+            f"  💳 Подписка → 💳 Мои карты → 🗑 Отвязать карту"
             f"{test_mode_text}",
             reply_markup=check_keyboard,
             parse_mode="HTML"
@@ -1487,6 +1726,223 @@ async def process_subscription(callback: CallbackQuery):
     else:
         logger.error(f"Ошибка создания платежа для пользователя {user_id}")
 
+        await callback.message.edit_text(
+            f"❌ Ошибка при создании платежа\n\n"
+            f"Попробуйте позже или обратитесь в поддержку."
+        )
+        await callback.answer("Ошибка создания платежа", show_alert=True)
+
+
+# ============ Обработчики оплаты сохраненной/новой картой ============
+
+@router.callback_query(F.data.startswith("pay_with_new_card:"))
+async def pay_with_new_card(callback: CallbackQuery, state: FSMContext):
+    """Оплата новой картой"""
+    user_id = callback.from_user.id
+    plan_id = callback.data.split(":")[1]
+
+    plan = SUBSCRIPTION_PLANS.get(plan_id)
+    if not plan:
+        await callback.answer("❌ Неверный тариф", show_alert=True)
+        return
+
+    # Проверяем наличие email
+    email = await db.get_user_email(user_id)
+
+    if not email:
+        # Email не указан - запрашиваем его
+        await state.update_data(plan_id=plan_id)
+        await state.set_state(SetEmail.waiting_for_email)
+
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        cancel_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_subscription")]
+        ])
+
+        await callback.message.edit_text(
+            "📧 <b>Укажите ваш email</b>\n\n"
+            "На этот адрес будет отправлен электронный чек.\n\n"
+            "Введите email в формате: <code>example@mail.com</code>",
+            reply_markup=cancel_keyboard,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+    # Email есть - создаем платеж с новой картой
+    payment_data = YuKassaPayment.create_payment(
+        amount=plan['price'],
+        description=plan['description'],
+        user_id=user_id,
+        email=email,
+        return_url=f"https://t.me/{(await bot.me()).username}",
+        save_payment_method=True
+    )
+
+    if payment_data:
+        # Сохраняем информацию о платеже в БД
+        await db.create_payment(
+            user_id=user_id,
+            payment_id=payment_data['id'],
+            plan_id=plan_id,
+            amount=plan['price'],
+            description=plan['description'],
+            confirmation_url=payment_data['confirmation_url'],
+            test=payment_data['test']
+        )
+
+        payment_url = payment_data['confirmation_url']
+
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        check_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить", url=payment_url)],
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment:{payment_data['id']}")],
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_menu")]
+        ])
+
+        test_mode_text = "\n\n⚠️ <b>ТЕСТОВЫЙ РЕЖИМ</b>\nИспользуйте тестовую карту: 5555 5555 5555 4477" if payment_data['test'] else ""
+
+        await callback.message.edit_text(
+            f"💳 Оформление подписки\n\n"
+            f"Тариф: {plan['name']}\n"
+            f"Стоимость: {plan['price']} ₽\n"
+            f"Срок: {plan['duration_days']} дней\n\n"
+            f"1️⃣ Нажмите кнопку 'Оплатить' для перехода к оплате\n"
+            f"2️⃣ После оплаты вернитесь в бот и нажмите 'Проверить оплату'\n\n"
+            f"ℹ️ <b>Важная информация:</b>\n"
+            f"• Для автопродления доступна только <b>оплата картой</b>\n"
+            f"• Ваша карта будет сохранена для автоматического продления\n"
+            f"• Отвязать карту можно в любой момент:\n"
+            f"  💳 Подписка → 💳 Мои карты → 🗑 Отвязать карту"
+            f"{test_mode_text}",
+            reply_markup=check_keyboard,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+    else:
+        logger.error(f"Ошибка создания платежа для пользователя {user_id}")
+        await callback.message.edit_text(
+            f"❌ Ошибка при создании платежа\n\n"
+            f"Попробуйте позже или обратитесь в поддержку."
+        )
+        await callback.answer("Ошибка создания платежа", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("pay_with_card:"))
+async def pay_with_saved_card(callback: CallbackQuery):
+    """Оплата сохраненной картой"""
+    user_id = callback.from_user.id
+    parts = callback.data.split(":")
+    plan_id = parts[1]
+    payment_method_id = parts[2]
+
+    plan = SUBSCRIPTION_PLANS.get(plan_id)
+    if not plan:
+        await callback.answer("❌ Неверный тариф", show_alert=True)
+        return
+
+    # Получаем email пользователя
+    email = await db.get_user_email(user_id)
+    if not email:
+        email = f"user{user_id}@telegram.user"  # Fallback email
+
+    # Создаем платеж по сохраненной карте
+    payment_data = YuKassaPayment.create_payment(
+        amount=plan['price'],
+        description=plan['description'],
+        user_id=user_id,
+        email=email,
+        return_url=f"https://t.me/{(await bot.me()).username}",
+        save_payment_method=False,  # Не сохраняем повторно
+        payment_method_id=payment_method_id  # Используем сохраненный метод
+    )
+
+    if payment_data:
+        # Сохраняем информацию о платеже в БД
+        await db.create_payment(
+            user_id=user_id,
+            payment_id=payment_data['id'],
+            plan_id=plan_id,
+            amount=plan['price'],
+            description=plan['description'],
+            confirmation_url=payment_data.get('confirmation_url', ''),
+            test=payment_data['test']
+        )
+
+        # Для автоплатежа по сохраненной карте confirmation_url может отсутствовать
+        # В этом случае платеж обрабатывается автоматически
+        if payment_data.get('confirmation_url'):
+            payment_url = payment_data['confirmation_url']
+
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            check_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 Подтвердить оплату", url=payment_url)],
+                [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment:{payment_data['id']}")],
+                [InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_menu")]
+            ])
+
+            await callback.message.edit_text(
+                f"💳 Оплата сохраненной картой\n\n"
+                f"Тариф: {plan['name']}\n"
+                f"Стоимость: {plan['price']} ₽\n"
+                f"Срок: {plan['duration_days']} дней\n\n"
+                f"Нажмите 'Подтвердить оплату' для завершения транзакции.",
+                reply_markup=check_keyboard
+            )
+        else:
+            # Автоматический платеж - проверяем статус через несколько секунд
+            await callback.message.edit_text(
+                f"⏳ Обработка платежа...\n\n"
+                f"Пожалуйста, подождите. Проверяем статус оплаты."
+            )
+
+            # Небольшая задержка для обработки платежа
+            import asyncio
+            await asyncio.sleep(3)
+
+            # Проверяем статус платежа
+            payment_info = YuKassaPayment.get_payment(payment_data['id'])
+
+            if payment_info and payment_info['status'] == 'succeeded' and payment_info['paid']:
+                # Активируем подписку
+                success = await db.activate_subscription_yukassa(payment_data['id'])
+                await db.update_payment_status(payment_data['id'], 'succeeded', True)
+
+                if success:
+                    subscription = await db.get_active_subscription(user_id)
+                    from datetime import datetime
+                    end_date = datetime.fromisoformat(subscription['end_date'])
+
+                    await callback.message.edit_text(
+                        f"✅ <b>Оплата прошла успешно!</b>\n\n"
+                        f"Подписка активирована до: {end_date.strftime('%d.%m.%Y')}\n\n"
+                        f"Спасибо за покупку! 🎉",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await callback.message.edit_text(
+                        "❌ Ошибка активации подписки\n\n"
+                        "Платеж прошел, но возникла ошибка активации. Обратитесь в поддержку."
+                    )
+            else:
+                # Платеж не прошел или еще в обработке
+                from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                check_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment:{payment_data['id']}")],
+                    [InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_menu")]
+                ])
+
+                status_text = payment_info.get('status', 'unknown') if payment_info else 'unknown'
+                await callback.message.edit_text(
+                    f"⏳ Платеж в обработке\n\n"
+                    f"Статус: {status_text}\n\n"
+                    f"Попробуйте проверить статус через минуту.",
+                    reply_markup=check_keyboard
+                )
+
+        await callback.answer()
+    else:
+        logger.error(f"Ошибка создания платежа по сохраненной карте для пользователя {user_id}")
         await callback.message.edit_text(
             f"❌ Ошибка при создании платежа\n\n"
             f"Попробуйте позже или обратитесь в поддержку."
@@ -1524,18 +1980,30 @@ async def check_payment_status(callback: CallbackQuery):
     if status == 'succeeded' and paid:
         # Платеж успешен - сохраняем платежный метод и активируем подписку
 
-        # Сохраняем платежный метод, если он был использован
-        if 'payment_method' in payment_info and payment_info['payment_method'].get('saved'):
-            payment_method = payment_info['payment_method']
-            card_data = payment_method.get('card') if payment_method['type'] == 'bank_card' else None
+        # Логируем весь ответ для отладки
+        logger.info(f"Полный ответ от ЮKassa для платежа {payment_id}: {payment_info}")
 
-            await db.save_payment_method(
-                user_id=user_id,
-                payment_method_id=payment_method['id'],
-                payment_method_type=payment_method['type'],
-                card_data=card_data
-            )
-            logger.info(f"Сохранен платежный метод {payment_method['id']} для пользователя {user_id}")
+        # Сохраняем платежный метод, если он был использован
+        if 'payment_method' in payment_info:
+            payment_method = payment_info['payment_method']
+            logger.info(f"Найден payment_method: {payment_method}")
+
+            # Сохраняем карту если это банковская карта
+            if payment_method.get('type') == 'bank_card' and payment_method.get('id'):
+                card_data = payment_method.get('card') if 'card' in payment_method else None
+
+                logger.info(f"Сохраняем банковскую карту для пользователя {user_id}")
+                await db.save_payment_method(
+                    user_id=user_id,
+                    payment_method_id=payment_method['id'],
+                    payment_method_type=payment_method['type'],
+                    card_data=card_data
+                )
+                logger.info(f"✅ Сохранен платежный метод {payment_method['id']} для пользователя {user_id}")
+            else:
+                logger.warning(f"payment_method не является банковской картой или нет ID: {payment_method}")
+        else:
+            logger.warning(f"payment_method не найден в ответе ЮKassa для платежа {payment_id}")
 
         # Активируем подписку
         success = await db.activate_subscription_yukassa(payment_id)
@@ -1704,6 +2172,13 @@ async def main():
 
     # Регистрируем роутер
     dp.include_router(router)
+
+    # Создаем экземпляр автопродления
+    auto_renewal = AutoRenewal(bot)
+
+    # Запускаем планировщик автопродлений в фоновой задаче
+    asyncio.create_task(auto_renewal.run_scheduler())
+    logger.info("Планировщик автопродлений запущен")
 
     # Запускаем бота
     logger.info("Бот запущен")
